@@ -54,13 +54,12 @@ instance IsVariant [Snapshot] where
 
 
 data SnapperConfig = SnapperConfig {
-  configName :: String,
   subvolume :: FilePath,
   configSettings :: Map String String
 } deriving (Eq, Show)
 
 snapperConfigFromTuple :: (String, String, Map String String) -> SnapperConfig
-snapperConfigFromTuple (name, path, settings) = SnapperConfig name path settings
+snapperConfigFromTuple (_, path, settings) = SnapperConfig path settings
 
 instance IsVariant SnapperConfig where
   fromVariant = fmap snapperConfigFromTuple . fromVariant
