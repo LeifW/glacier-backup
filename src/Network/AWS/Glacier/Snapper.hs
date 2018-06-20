@@ -1,11 +1,16 @@
-{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances #-}
-module Snapper (SnapperConfig(..), Snapshot(..), getConfig, listSnapshots, lastSnapshot, runSystemDBus) where
+{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, LambdaCase, RecordWildCards  #-}
+module Snapper (SnapperConfig(..), Snapshot(..), getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
 import DBus.Client --(Client, call, connectSession, connectSystem)
 import DBus
 import DBus.Generation (clientArgumentUnpackingError)
 import Data.Map (Map)
+import qualified Data.Map as Map
 import Control.Exception (bracket, throwIO, Exception)
+import Control.Monad.IO.Class (MonadIO, liftIO)
 import Safe (lastMay)
+import Data.Maybe (fromMaybe)
+
+import Data.Text (Text)
 
 import Data.Word
 import Data.Int
@@ -16,6 +21,11 @@ import System.FilePath ((</>))
 
 import Data.Natural
 
+import Data.Data (Data)
+import GHC.Generics (Generic)
+
+import Util
+
 instance IsVariant Natural where
   fromVariant v = case typeOf v of
                     TypeWord8  ->  fromIntegral <$> fromVariant @Word8 v
@@ -25,8 +35,8 @@ instance IsVariant Natural where
                     _ -> Nothing --error $ "Unexpected type " ++ show other
                
 
-runSystemDBus :: (Client -> IO a) -> IO a 
-runSystemDBus = bracket connectSystem disconnect
+runSystemDBus :: MonadIO m => (Client -> IO a) -> m a 
+runSystemDBus = liftIO . bracket connectSystem disconnect
 
 listSnapshotsMethodCall :: MethodCall
 listSnapshotsMethodCall = (methodCall
@@ -38,20 +48,73 @@ listSnapshotsMethodCall = (methodCall
 getConfigMethodCall :: MethodCall
 getConfigMethodCall = listSnapshotsMethodCall { methodCallMember = "GetConfig" }
 
+setSnapshotMethodCall :: MethodCall
+setSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "SetSnapshot" }
+
+{-
+data SnapshotRef = SnapshotRef {
+  snapshotNum :: Int,
+  snapshotTime ::  UTCTime
+} deriving (Eq, Show, Generic, Data)
+-}
+type SnapshotRef = Int
+
+data UploadStatus = UploadStatus {
+  uploadId :: Text,
+  deltaFrom :: Maybe SnapshotRef
+} deriving (Eq, Show, Generic, Data)
+
 
 data Snapshot = Snapshot {
   snapshotNum :: Int,
-  snapshotTime ::  UTCTime
-} deriving (Eq, Show)
+  timestamp :: UTCTime,
+  uploadedStatus :: Maybe UploadStatus,
+  cleanup :: Cleanup,
+  description :: Maybe String
+} deriving (Eq, Show, Generic, Data)
 
+data Cleanup = Number | Timeline | None deriving (Eq, Show, Generic, Data)
+
+cleanupToString :: Cleanup -> String
+cleanupToString Number = "number"
+cleanupToString Timeline = "timeline"
+cleanupToString None = ""
+
+cleanupFromString :: String -> Cleanup
+cleanupFromString "number" = Number
+cleanupFromString "timeline" = Timeline
+cleanupFromString "" = None
+
+instance IsVariant Cleanup where
+  toVariant = toVariant . cleanupToString
+  fromVariant v = cleanupFromString <$> fromVariant @String v
+
+stringToMaybe :: String -> Maybe String
+stringToMaybe s = boolToMaybe (not $ null s) s
+
+maybeToString :: Maybe String -> String
+maybeToString = fromMaybe ""
+
+instance IsVariant (Maybe String) where
+  toVariant = toVariant . maybeToString
+  fromVariant v = stringToMaybe <$> fromVariant v
+
+--snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
 snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, String, Map String String) -> Snapshot
-snapshotFromTuple (num, _, _, dateTime, _, _, _, _ )  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
+snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime) Nothing (cleanupFromString cleanup) (stringToMaybe  description)
+-- TODO Replace the above Nothingwith uploadStatus, extractedfrom userdata
+--snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
 
--- Can't just make an instance for Snapshot because of the IsValue typeclass...
+instance IsVariant Snapshot where
+  fromVariant v = snapshotFromTuple <$> fromVariant v
+--  toVariant (Snapshot num _)  = toVariant @Word32 $ fromIntegral num
+
+-- There's no IsVariant a => IsVariant [a] rule, just IsValue a => IsVariant [a].
+-- And IsValue is a closed class, per the documentation.
+--instance IsVariant [SnapshotRef] where
 instance IsVariant [Snapshot] where
   fromVariant = fmap (map snapshotFromTuple) . fromVariant
   --fromVariant v = snapshotFromTuple <$> fromVariant v
-
 
 data SnapperConfig = SnapperConfig {
   subvolume :: FilePath,
@@ -66,38 +129,75 @@ instance IsVariant SnapperConfig where
 
 --listConfigsMethodCall = listSnapshotsMethodCall { methodCallMember = memberName_ "ListConfigs", methodCallDestination = Just "org.freedesktop.DBus"}
 --listConfigsMethodCall = listSnapshotsMethodCall { methodCallMember = memberName_ "ListConfigs", methodCallDestination = Just "org.opensuse.Snapper"}
-doMethodCall :: (IsVariant a, IsVariant b) => MethodCall -> [a] -> Client -> IO (Either MethodError b)
+doMethodCall :: IsVariant a => MethodCall -> [Variant] -> Client -> IO a
 doMethodCall method args client = do
-  callResult <- call client method { methodCallBody = toVariant <$> args }
-  pure $ convertDBusSingleResult . methodReturnBody =<< callResult 
+  callResult <- call client method { methodCallBody = args }
+  --either (throwIO ) pure  $ convertDBusResult . methodReturnBody =<< callResult 
+  successfulResult <- throwIOEither callResult 
+  throwIOEither $ convertDBusResult $ methodReturnBody successfulResult
 --doMethodCall :: IsVariant b => MethodCall -> -> Client -> IO (Either MethodError b)
 
-listSnapshots :: String -> Client -> IO (Either MethodError [Snapshot])
-listSnapshots config = doMethodCall listSnapshotsMethodCall [config]
+throwIOEither :: Exception e => Either e a -> IO a
+throwIOEither = either throwIO pure
+
+listSnapshots :: String -> Client -> IO [Snapshot]
+listSnapshots config = doMethodCall listSnapshotsMethodCall [toVariant config]
 
 --getConfig :: String -> Client -> IO (Either MethodError (String, String, Map String String))
-getConfig :: String -> Client -> IO (Either MethodError SnapperConfig)
-getConfig config = doMethodCall getConfigMethodCall [config]
+getConfig :: String -> Client -> IO SnapperConfig
+getConfig config = doMethodCall getConfigMethodCall [toVariant config]
+
+--setSnapshot :: String -> Snapshot -> String -> Cleanup -> Map String String -> Client -> IO String
+--setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
+--
+setSnapshot :: String -> Snapshot -> Client -> IO ()
+setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [toVariant config, toVariant @Word32 (fromIntegral snapshotNum), toVariant description, toVariant cleanup, toVariant (Map.empty @String @String)]
+--setSnapshot config (Snapshot snapshotNum timestamp description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
+--setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant (50 :: Word32),  toVariant ("" :: String), toVariant userdata]
+
+getSubvolumeFromConfig :: String -> Client -> IO FilePath
+getSubvolumeFromConfig config client = subvolume <$> getConfig config client
 
 -- The list of snapshots from Snapper always starts with "Snapshot 0", which isn't actually a snapshot, just the current state of the partition.
 -- So throw it out, as we're only concerned with snapshots.
 lastSnapshot :: [Snapshot] -> Maybe Snapshot
-lastSnapshot (Snapshot 0 _ : t) = lastMay t
-lastSnapshot _ = Nothing
+lastSnapshot (Snapshot 0 _ _  _ _ : t) = lastMay t
+--lastSnapshot _ = Nothing
+
+--nthSnapshotOnSubvolume :: FilePath -> Snapshot -> FilePath
+--nthSnapshotOnSubvolume subvolume snapshot =
+--  subvolume </> ".snapshots" </> show (snapshotNum snapshot) </> "snapshot"
+
+nthSnapshotOnSubvolume :: FilePath -> Word32 -> FilePath
+nthSnapshotOnSubvolume subvolume num =
+  subvolume </> ".snapshots" </> show num </> "snapshot"
 
 {-
+snapshotDirFromConfig :: SnapperConfig -> Snapshot -> FilePath
+snapshotDirFromConfig (SnapperConfig subvolume _)  (Snapshot num _) =
+  subvolume </> ".snapshots" </> show num </> "snapshot"
+-}
+
+
+data WrappedMethodError = WrappedMethodError MethodError
+
+instance Show WrappedMethodError where
+  show (WrappedMethodError e) = methodErrorMessage e
+instance Exception WrappedMethodError
 instance Exception MethodError
-getLastSnapshot :: String -> IO (Maybe FilePath)
-getLastSnapshot config = do
-   
-  let snapshotsDir = 
-  snapshots <- runSystemDBus (listSnapshots config) >>= either throwIO pure
-  pure $  lastSnapshot snapshots
---}
 
-maybeToEither :: e -> Maybe a -> Either e a
-maybeToEither e = maybe (Left e) Right
 
-convertDBusSingleResult :: IsVariant a => [Variant] -> Either MethodError a
-convertDBusSingleResult [singleResult] = maybeToEither (clientArgumentUnpackingError [singleResult]) $ fromVariant singleResult
-convertDBusSingleResult results = Left $ clientArgumentUnpackingError results
+getLastSnapshot :: String -> Client -> IO (Maybe Snapshot)
+getLastSnapshot config client = lastSnapshot <$> listSnapshots config client
+--  subvolume <- getSubvolumeFromConfig config client
+--  snapshots <- listSnapshots config client
+--  pure $ lastSnapshot snapshots
+  --pure $ nthSnapshotOnSubvolume subvolume <$> lastSnapshot snapshots
+
+convertDBusResult :: IsVariant a => [Variant] -> Either MethodError a
+convertDBusResult [] = maybeToEither (error  "Only Unit is supported as a return type for no results") $ fromVariant $ toVariant ()
+--convertDBusResult [] = maybeToEither (clientArgumentUnpackingError []) $ fromVariant $ toVariant ()
+convertDBusResult [singleResult] = maybeToEither (error $ "can't extract variant" ++ show [singleResult]) $ fromVariant singleResult
+--convertDBusSingleResult [singleResult] = maybeToEither (clientArgumentUnpackingError [singleResult]) $ fromVariant singleResult
+convertDBusResult results = Left $ error $ "unexpected array of results" ++ show results
+--convertDBusSingleResult results = Left $ clientArgumentUnpackingError results

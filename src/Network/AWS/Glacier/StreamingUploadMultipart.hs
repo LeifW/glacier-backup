@@ -1,13 +1,14 @@
-{-# LANGUAGE TypeApplications, PackageImports, OverloadedStrings, TypeFamilies, FlexibleContexts, FlexibleInstances, UndecidableInstances #-}
+{-# LANGUAGE PackageImports, OverloadedStrings, FlexibleContexts #-}
 module StreamingUploadMultipart (chunkSizeToBytes, upload, initiate, uploadByChunks, complete) where
 
 --import Network.AWS (MonadAWS, runAWS, liftAWS, newEnv, Credentials(..), within, Region(..))
-import Network.AWS (MonadAWS, runAWS, AWS, liftAWS, Credentials(..), within, Region(..), HasEnv, environment)
+import Network.AWS (MonadAWS, runAWS, AWS, liftAWS, Credentials(..), Region(..), HasEnv, environment)
 import Control.Monad.Catch          (MonadCatch)
 import Control.Monad.Trans.Resource (MonadResource, ResourceT)
 import Type.Reflection (Typeable)
 import Control.Monad.Trans.AWS (runAWST, runResourceT, AWST, AWST', AWSConstraint, send, Env, LogLevel(..), newLogger, envLogger, envRegion, newEnv)
 import Network.AWS.Glacier
+import Network.AWS.Data.Text (toText)
 import Network.AWS.Data.Body (toHashed)
 --import Control.Monad.Trans.Reader   ( ReaderT  )
 import System.IO (stdout)
@@ -39,34 +40,15 @@ import TreeHash --(toHex)
 import AmazonkaSupport ()
 import ConduitSupport
 
---import Data.Has
 --default (Int)
 import Formatting
 
-import qualified Data.Text.IO as TIO
-
 -- Powers of two from 1 MB to 4 GB.
 allowedChunkSizes :: [Int]
-allowedChunkSizes = map @Int (2 ^) [0..12]
+allowedChunkSizes = map (2 ^) [0..12]
 
 megabytesToBytes :: Int -> Int
 megabytesToBytes i = i * 1024 * 1024
-
-{-
-instance PrimMonad m => PrimMonad (ReaderT r m) where
-  type PrimState (ReaderT r m) = PrimState m
-  primitive = lift . primitive
-  {-# INLINE primitive #-}
--}
-
-textShow :: Show a => a -> Text
-textShow = pack . show
-
-intToText :: Int -> Text
-intToText = sformat int
-
-toHexText :: ByteArrayAccess ba => ba -> Text
-toHexText  = decodeUtf8 . toHex
 
 treeHash :: ByteString -> Digest SHA256
 treeHash = treeHashByChunksOf (1024 * 1024) -- 1 MB chunks == 1024k where 1k = 1024 bytes
@@ -161,18 +143,12 @@ upload accountId vaultName archiveDescription chunkSizeMB = do
   --throwError undefined
   pure completeResponse
 
-foo :: AWSConstraint Env m => m Int
-foo = pure 5
-
-eitherBar :: Either AmazonError Int
-eitherBar = Right 5
-
-bar :: MonadThrow m => m Int
-bar = either throwM pure eitherBar-- throwM $ UnexpectedHTTPResponseCode 200
+--bar :: MonadThrow m => m Int
+--bar = either throwM pure eitherBar-- throwM $ UnexpectedHTTPResponseCode 200
 --bar = throwM $ UnexpectedHTTPResponseCode 200
 
-baz :: MonadError AmazonError m => m Int
-baz = pure 10
+--baz :: MonadError AmazonError m => m Int
+--baz = pure 10
 
 uploadByChunks :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m (Int, Digest SHA256)
 uploadByChunks chunkSizeBytes accountId vaultName uploadId = do
@@ -186,9 +162,9 @@ initiate :: (AWSConstraint r m)
        -> Int -- ^ Chunk Size in MB
        -> m Text
 initiate accountId vaultName archiveDescription chunkSizeBytes = do
-  let initiateRequest =  set imuArchiveDescription archiveDescription $ initiateMultipartUpload accountId vaultName (intToText  chunkSizeBytes)
+  let initiateRequest = set imuArchiveDescription archiveDescription $ initiateMultipartUpload accountId vaultName (toText chunkSizeBytes)
   initiateResponse <- send initiateRequest
-  let responseCode = initiateResponse  ^. imursResponseStatus in -- why does `where` give a parse error for this?
+  let responseCode = initiateResponse  ^. imursResponseStatus in
     unless (responseCode == 201) $ error ("upload: call to InitiateMultipartUpload returned status code: " ++ show responseCode)
   pure $ fromMaybe (error "upload: No UploadId on initiate response") $ initiateResponse ^. imursUploadId
 
@@ -202,7 +178,7 @@ complete :: (AWSConstraint r m)
        -> Int
        -> m ArchiveCreationOutput
 complete accountId vaultName uploadId treeHashChecksum totalArchiveSize = do
-  let completeRequest = completeMultipartUpload accountId vaultName uploadId (intToText totalArchiveSize) (toHexText treeHashChecksum)
+  let completeRequest = completeMultipartUpload accountId vaultName uploadId (toText totalArchiveSize) (toText treeHashChecksum)
   send completeRequest
 
 range :: Int -> Int -> Int -> (Int, Int)
@@ -229,11 +205,8 @@ pipeline chunkSizeBytes accountId vaultName uploadId =
           uploadChunk (sequenceNum, chunk) = do
             let size = BS.length chunk
             let byteRange = range sequenceNum chunkSizeBytes size
-            --liftIO $ print byteRange
-            --liftIO $ TIO.putStrLn $ rangeHeader byteRange
             let checksum = treeHash chunk
-            --TODO: Calc proper Range header: chunkSize * sequenceNum -  chunkSize * sequenceNum + size
-            let request = uploadMultipartPart accountId vaultName uploadId (rangeHeader byteRange) (toHexText checksum) (toHashed chunk)
+            let request = uploadMultipartPart accountId vaultName uploadId (rangeHeader byteRange) (toText checksum) (toHashed chunk)
             response <- send request
             --unless reponse checksum = sent checksum error "why?
             pure (BS.length chunk, checksum) 

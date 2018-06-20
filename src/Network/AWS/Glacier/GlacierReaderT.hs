@@ -1,5 +1,5 @@
 {-# LANGUAGE TemplateHaskell, FlexibleContexts, FlexibleInstances, PackageImports, OverloadedStrings #-}
-module GlacierReaderT (GlacierSettings(..), GlacierEnv(..),  HasGlacierSettings, SUM.chunkSizeToBytes, initiate, uploadByChunks, complete, upload, runReaderResource) where
+module GlacierReaderT (GlacierSettings(..), GlacierEnv(..),  HasGlacierSettings(..), SUM.chunkSizeToBytes, initiate, uploadByChunks, complete, upload, runReaderResource) where
 
 import Data.Text (Text)
 import Control.Lens
@@ -24,6 +24,8 @@ data GlacierSettings = GlacierSettings {
   _accountId :: Text,
   _vaultName :: Text
 } deriving Show
+
+--makeLenses ''GlacierSettings
 
 --instance Has Env r => HasEnv r where
 --  environment = hasLens
@@ -81,12 +83,6 @@ complete uploadId treeHashChecksum totalArchiveSize = do
   --GlacierSettings accountId vaultName <- asks getter
   GlacierSettings accountId vaultName <- view glacierSettingsL
   SUM.complete accountId vaultName uploadId treeHashChecksum totalArchiveSize 
-
---a :: (MonadResource m, MonadCatch m) =>  (Env, GlacierSettings) -> m Text
---a env = runReaderT (initiate Nothing 1) env
-
-b :: (Env, GlacierSettings)
-b = (undefined, GlacierSettings "" "")
 
 upload :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m)
        => Maybe Text 

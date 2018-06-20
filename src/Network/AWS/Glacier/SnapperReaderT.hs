@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings #-}
 module SnapperReaderT  where
 
 import DBus.Client (Client, connectSystem, disconnect)
@@ -9,11 +8,8 @@ import System.FilePath ((</>))
 
 import Control.Monad.Trans.Except
 import Control.Monad.Reader
-import Snapper (Snapshot, SnapperConfig, subvolume, snapshotNum, lastSnapshot)
+import Snapper (Snapshot(Snapshot), SnapperConfig(SnapperConfig), lastSnapshot, snapshotDirFromConfig, runSystemDBus)
 import qualified Snapper
-
-runSystemDBus :: (Client -> IO a) -> IO a 
-runSystemDBus = bracket connectSystem disconnect
 
 type SnapperEnv = (String, Client)
 
@@ -41,15 +37,8 @@ getConfig = liftEitherSnapperFunc Snapper.getConfig
 getLastSnapshot' :: EitherSnapperReader (Maybe FilePath)
 getLastSnapshot' = do
   config <- getConfig
-  let snapshotsDir = subvolume config </> ".snapshots"
   snapshots <- listSnapshots
-  let maybeSnapshotNum = snapshotNum <$> lastSnapshot snapshots
-  pure $ (\n -> snapshotsDir </> show n </> "snapshot") <$> maybeSnapshotNum
-
---nthSnapshotDir :: SnapperConfig -> Snapshot -> FilePath
---nthSnapshotDir (SnapperConfig -> Snapshot -> FilePath
-
-instance Exception MethodError
+  pure $ snapshotDirFromConfig config <$> lastSnapshot snapshots
 
 getLastSnapshot :: String -> IO (Maybe FilePath)
 getLastSnapshot config =

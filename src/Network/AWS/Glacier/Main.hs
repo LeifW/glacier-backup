@@ -1,7 +1,9 @@
 {-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications #-}
 module Main where
 
+import Control.Monad (join)
 import Control.Exception
+import Type.Reflection (Typeable)
 import System.Environment (getArgs)
 import System.IO (stdout)
 import Data.Maybe (fromMaybe)
@@ -16,6 +18,8 @@ import Data.Yaml (decodeFileEither)
 
 import Control.Monad.Trans.AWS --(AWSConstraint, Credentials(..))
 import Control.Monad (guard)
+import Control.Monad.Catch (throwM)
+import Control.Monad.IO.Class (liftIO)
 import Control.Lens.Setter (set)
 import Network.AWS.Data.Text
 
@@ -25,6 +29,7 @@ import Network.AWS.Glacier (ArchiveCreationOutput)
 import Network.AWS (LogLevel(..))
 import GlacierReaderT
 import GlacierUploadFromProc
+import Snapper
 
 --app_name :: String
 --app_name = "glacier-backup"
@@ -48,6 +53,8 @@ btrfsSendToGlacier :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m)
                       -> m ArchiveCreationOutput
 btrfsSendToGlacier parent snapshot = glacierUploadFromProcess (btrfsSendCmd parent snapshot)
 
+--runDBusWithSettings :: (HasGlacierSettings r, MonadReader r m => 
+
 -- Talk to Snapper (over DBus) and SimpleDB to figure out where we're at.
 -- Err, give the 
 -- SELECT (snapshotNum, date) FROM uploads SORT BY date LIMIT 1
@@ -69,25 +76,36 @@ shouldCreateNewFullBackup = do
   
 --This is only called if shouldcreate found a full upload, so there's at least one upload
 --hence this doesn't return a maybe
-getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Int, UTCTime)
+getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Maybe Snapshot)
 getLastUpload = pure undefined -- ask simpledb
 
-getDeltaRange :: (AWSConstraint r m, HasGlacierSettings r) => String -> m (Maybe (Int, UTCTime), (Int, UTCTime))
+-- You've gotta have at least one snapshot already or we're quitting.
+data E = E deriving (Typeable, Show)
+instance Exception E
+
+getDeltaRange :: (AWSConstraint r m, HasGlacierSettings r) => String -> m (Maybe Snapshot, Snapshot)
 getDeltaRange snapperConfig = do
   -- get snapper config: subvolume path
   -- is there an existing snapshot according to snapper?
   -- If not, throw an error, there's nothing we can do for now.
   -- Get the latest snapshot from snapper
   --latestSnapshot from snapper
-  let latestSnapshot = undefined :: (Int, UTCTime)
+  subvolume <-  runSystemDBus (getSubvolumeFromConfig snapperConfig)
+  --let latestSnapshot = undefined :: (Int, UTCTime)
+  lastSnapshot <- maybe (throwM E) pure =<< runSystemDBus (getLastSnapshot snapperConfig)
+  --lastSnapshot <- maybe (throwM E) pure =<< liftIO (getLastSnapshot snapperConfig)
   doFullBackup <- shouldCreateNewFullBackup
-  previousSnapshot <- traverse (const getLastUpload) doFullBackup
+  -- Technically the join isn't needed - we know getLastUpload will have at least one item if there's already a full backup uploaded.
+  -- Could also use >>= of MaybeT
+  previousSnapshot <- join <$> traverse (const getLastUpload) doFullBackup
+  --previousSnapshot <- sequence $ doFullBackup >>= (const getLastUpload)
   --previousSnapshot <- if doFullBackup then pure Nothing else Just getLatestUpload
   --fullBackup <- createNewFullBackup
   --let previousSnapshot = const . getLatestUpload <$> fullBackup
-  pure (previousSnapshot, latestSnapshot)
+  --pure (previousSnapshot, lastSnapshot)
   -- get the paths to those snapshots
   --pure undefined 
+  pure (previousSnapshot, lastSnapshot)
 
 provisionAWS :: (AWSConstraint r m, HasGlacierSettings r) => m ()
 provisionAWS = pure undefined
