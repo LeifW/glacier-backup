@@ -1,5 +1,5 @@
 {-# LANGUAGE TemplateHaskell, FlexibleContexts, FlexibleInstances, PackageImports, OverloadedStrings #-}
-module GlacierReaderT (GlacierSettings(..), GlacierEnv(..),  HasGlacierSettings(..), SUM.chunkSizeToBytes, initiate, uploadByChunks, complete, upload, runReaderResource) where
+module GlacierReaderT (SUM.NumBytes, GlacierSettings(..), GlacierEnv(..),  HasGlacierSettings(..), SUM.chunkSizeToBytes, initiate, uploadByChunks, complete, upload, runReaderResource) where
 
 import Data.Text (Text)
 import Control.Lens
@@ -15,6 +15,7 @@ import Data.Conduit (ConduitT, Void)
 import Data.ByteString (ByteString)
 import Network.AWS.Glacier (ArchiveCreationOutput)
 
+import StreamingUploadMultipart (NumBytes)
 import qualified StreamingUploadMultipart as SUM
 
 --import Control.Monad.Trans.AWS (runAWST, runResourceT, AWST, AWST', AWSConstraint, send, HasEnv, Env, LogLevel(..), newLogger, envLogger, newEnv)
@@ -68,7 +69,7 @@ initiate archiveDescription chunkSize = do
   GlacierSettings accountId vaultName <- view glacierSettingsL
   SUM.initiate accountId vaultName archiveDescription chunkSize
 
-uploadByChunks :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m) => Int -> Text -> ConduitT ByteString Void m (Int, Digest SHA256)
+uploadByChunks :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m) => Int -> Text -> ConduitT ByteString Void m (NumBytes, Digest SHA256)
 uploadByChunks chunkSizeBytes uploadId = do
   --GlacierSettings accountId vaultName <- asks getter
   GlacierSettings accountId vaultName <- view glacierSettingsL
@@ -77,7 +78,7 @@ uploadByChunks chunkSizeBytes uploadId = do
 complete :: (AWSConstraint r m, HasGlacierSettings r)
        => Text 
        -> Digest SHA256
-       -> Int
+       -> NumBytes
        -> m ArchiveCreationOutput
 complete uploadId treeHashChecksum totalArchiveSize = do
   --GlacierSettings accountId vaultName <- asks getter

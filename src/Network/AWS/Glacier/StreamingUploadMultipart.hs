@@ -1,9 +1,9 @@
 {-# LANGUAGE PackageImports, OverloadedStrings, FlexibleContexts #-}
-module StreamingUploadMultipart (chunkSizeToBytes, upload, initiate, uploadByChunks, complete) where
+module StreamingUploadMultipart (NumBytes, chunkSizeToBytes, upload, initiate, uploadByChunks, complete) where
 
 --import Network.AWS (MonadAWS, runAWS, liftAWS, newEnv, Credentials(..), within, Region(..))
 import Network.AWS (MonadAWS, runAWS, AWS, liftAWS, Credentials(..), Region(..), HasEnv, environment)
-import Control.Monad.Catch          (MonadCatch)
+import Control.Monad.Catch          (MonadThrow, MonadCatch, Exception, throwM)
 import Control.Monad.Trans.Resource (MonadResource, ResourceT)
 import Type.Reflection (Typeable)
 import Control.Monad.Trans.AWS (runAWST, runResourceT, AWST, AWST', AWSConstraint, send, Env, LogLevel(..), newLogger, envLogger, envRegion, newEnv)
@@ -17,9 +17,11 @@ import "cryptonite" Crypto.Hash
 import Data.ByteArray (ByteArrayAccess)
 
 import Data.Conduit (ConduitT, runConduit,  (.|), Void, transPipe)
+import Data.Conduit.Zlib (gzip)
 import Data.Conduit.Lift
 import qualified Data.Conduit.Combinators as C
 
+import Data.Int (Int64)
 import Data.Text (Text, pack)
 import Data.Text.Encoding (decodeUtf8)
 import Data.ByteString (ByteString)
@@ -32,7 +34,6 @@ import Data.Maybe (fromMaybe)
 
 import Control.Monad.Primitive (PrimMonad)
 
-import Control.Monad.Catch
 import Control.Monad.Error.Class
 import Control.Monad.Reader
 
@@ -43,10 +44,16 @@ import ConduitSupport
 --default (Int)
 import Formatting
 
+type NumBytes = Int64
+
 -- Powers of two from 1 MB to 4 GB.
 allowedChunkSizes :: [Int]
 allowedChunkSizes = map (2 ^) [0..12]
 
+-- Can't use Int64 for chunk size, because we're limited by the signature of
+-- Conduit's vectorBuilder for the chunking, which takes an Int.
+-- Theoretically that limits us to a chunk size of 2GB on 32-bit machines
+-- which seems like a far-fetched scenario for a number of reasons (2GB upload chunk in a 4GB address space?)
 megabytesToBytes :: Int -> Int
 megabytesToBytes i = i * 1024 * 1024
 
@@ -150,7 +157,7 @@ upload accountId vaultName archiveDescription chunkSizeMB = do
 --baz :: MonadError AmazonError m => m Int
 --baz = pure 10
 
-uploadByChunks :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m (Int, Digest SHA256)
+uploadByChunks :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m (Int64, Digest SHA256)
 uploadByChunks chunkSizeBytes accountId vaultName uploadId = do
   (sizes, checksums) <- unzip <$> pipeline chunkSizeBytes accountId vaultName uploadId
   pure (sum sizes, treeHashList checksums)
@@ -159,7 +166,7 @@ initiate :: (AWSConstraint r m)
        => Text 
        -> Text 
        -> Maybe Text 
-       -> Int -- ^ Chunk Size in MB
+       -> Int -- ^ Chunk Size in bytes
        -> m Text
 initiate accountId vaultName archiveDescription chunkSizeBytes = do
   let initiateRequest = set imuArchiveDescription archiveDescription $ initiateMultipartUpload accountId vaultName (toText chunkSizeBytes)
@@ -175,33 +182,34 @@ complete :: (AWSConstraint r m)
        -> Text 
        -> Text 
        -> Digest SHA256
-       -> Int
+       -> NumBytes
        -> m ArchiveCreationOutput
 complete accountId vaultName uploadId treeHashChecksum totalArchiveSize = do
   let completeRequest = completeMultipartUpload accountId vaultName uploadId (toText totalArchiveSize) (toText treeHashChecksum)
   send completeRequest
 
-range :: Int -> Int -> Int -> (Int, Int)
+range :: Int -> Int -> Int -> (NumBytes, NumBytes)
 range index chunkSize size =
-  let startOffset = index * chunkSize
-      endOffset = startOffset + size - 1 -- math is hard? I guess the end range is non-inclusive?
+  let startOffset = fromIntegral index * fromIntegral chunkSize
+      endOffset = startOffset + fromIntegral size - 1 -- math is hard? I guess the end range is non-inclusive?
   in
      (startOffset, endOffset)
 
 --rangeHeader :: Int -> Int -> Int -> Text
-rangeHeader :: (Int, Int) -> Text
+rangeHeader :: (NumBytes, NumBytes) -> Text
 rangeHeader (start, end) = sformat ("bytes " % int % "-" % int % "/*") start end
   
 
 --uploadChunk :: Text -> Text
-pipeline :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m [(Int, Digest SHA256)]
+pipeline :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m [(Int64, Digest SHA256)]
 pipeline chunkSizeBytes accountId vaultName uploadId = 
-     chunksOf chunkSizeBytes
+     gzip
+  .| chunksOf chunkSizeBytes
   .| zipWithIndex
   .| C.mapM uploadChunk
     -- .| C.map (\(i, bs) -> (BS.length bs, hash bs))
   .| C.sinkList
-    where uploadChunk :: (AWSConstraint r m) => (Int,  ByteString) -> m (Int, Digest SHA256)
+    where uploadChunk :: (AWSConstraint r m) => (Int,  ByteString) -> m (Int64, Digest SHA256)
           uploadChunk (sequenceNum, chunk) = do
             let size = BS.length chunk
             let byteRange = range sequenceNum chunkSizeBytes size
@@ -209,4 +217,4 @@ pipeline chunkSizeBytes accountId vaultName uploadId =
             let request = uploadMultipartPart accountId vaultName uploadId (rangeHeader byteRange) (toText checksum) (toHashed chunk)
             response <- send request
             --unless reponse checksum = sent checksum error "why?
-            pure (BS.length chunk, checksum) 
+            pure (fromIntegral $ BS.length chunk, checksum) 

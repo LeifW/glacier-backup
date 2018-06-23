@@ -1,12 +1,13 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications, RecordWildCards #-}
-module Main where
+{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications, RecordWildCards, DataKinds, FlexibleInstances #-}
+module UploadSnapshot where
 
 import Control.Exception
 import Type.Reflection (Typeable)
 import System.Environment (getArgs)
 import System.IO (stdout)
 import Data.Maybe (fromMaybe)
-import Data.Text (Text)
+import Data.Text (Text, stripEnd)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Int (Int64)
 import Data.Time.Clock (UTCTime)
 
@@ -21,35 +22,30 @@ import Control.Monad.Catch (throwM)
 import Control.Monad.IO.Class (liftIO)
 import Control.Lens.Setter (set)
 import Network.AWS.Data.Text
+import Network.AWS.Data.ByteString
 
 import Data.Conduit.Process (CreateProcess, proc)
 import Control.Monad.Primitive (PrimMonad)
 import Network.AWS.Glacier (ArchiveCreationOutput)
 import Network.AWS (LogLevel(..))
+import Network.AWS.Data.Time -- (Time, ISO8601)
 import GlacierReaderT
 import GlacierUploadFromProc
 import Snapper
-import AllowedChunkSizes
 
+import qualified Data.Csv as Csv
+import Data.Map (Map, fromList) 
 
---app_name :: String
---app_name = "glacier-backup"
+btrfsSendCmd :: Maybe FilePath -> FilePath -> CreateProcess
+btrfsSendCmd parent snapshot = proc "btrfs" $ ["send"] ++ maybe [] (\p -> ["-p", p]) parent ++ [snapshot]
 
-data Config = Config {
-  snapper_config_name :: String, -- Defaults to "root"
-  region :: Region,
-  glacier_vault_name :: Text,
-  upload_chunk_size_MB :: ChunkSizeMB,
-  aws_account_id :: Text -- A 12-digit number, defaults to account of credentials. (-)
-  --aws_account_id :: Maybe Int64 -- A 12-digit number, defaults to account of credentials. (-)
-} deriving (Show, Generic, FromJSON)
-
-confDef :: Value
-confDef = object [
-    ("snapper_config_name", "root"),
-    ("aws_account_id",      "-"),
-    ("upload_chunk_size_MB", toJSON @Int 64)
-  ]
+btrfsSendToGlacier :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m)
+                      => Maybe FilePath
+                      -> FilePath
+                      -> Maybe Text 
+                      -> Int -- ^ Chunk Size in MB
+                      -> m (NumBytes, ArchiveCreationOutput)
+btrfsSendToGlacier parent snapshot = glacierUploadFromProcess (btrfsSendCmd parent snapshot)
 
 --runDBusWithSettings :: (HasGlacierSettings r, MonadReader r m => 
 
@@ -73,7 +69,6 @@ shouldCreateNewFullBackup = do
   pure undefined
   
 --This is only called if shouldcreate found a full upload, so there's at least one upload
---hence this doesn't return a maybe
 getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Maybe Snapshot)
 getLastUpload = pure undefined -- ask simpledb
 
@@ -88,7 +83,7 @@ getDeltaRange snapperConfig = do
   -- If not, throw an error, there's nothing we can do for now.
   -- Get the latest snapshot from snapper
   --latestSnapshot from snapper
-  subvolume <-  runSystemDBus (getSubvolumeFromConfig snapperConfig)
+  subvolume <- runSystemDBus (getSubvolumeFromConfig snapperConfig)
   --let latestSnapshot = undefined :: (Int, UTCTime)
   lastSnapshot <- maybe (throwM E) pure =<< runSystemDBus (getLastSnapshot snapperConfig)
   --lastSnapshot <- maybe (throwM E) pure =<< liftIO (getLastSnapshot snapperConfig)
@@ -108,44 +103,18 @@ getDeltaRange snapperConfig = do
 provisionAWS :: (AWSConstraint r m, HasGlacierSettings r) => m ()
 provisionAWS = pure undefined
 
+
 data ArchiveDescription = ArchiveDescription {
-  current :: SnapshotRef,
-  timestamp :: UTCTime,
-  previous :: Maybe SnapshotRef
+  _current :: SnapshotRef,
+  _timestamp :: ISO8601,
+  _previous :: Maybe SnapshotRef
 } deriving (Show, Generic)
+
+--instance FromText ArchiveDescription where
+--  toText b = stripEnd $ toText $ toBS $ Csv.encode [b]
 
 uploadBackup :: (AWSConstraint r m, HasGlacierSettings r) => String -> m ()
 uploadBackup snapperConfig = do
   (previous, current) <- getDeltaRange snapperConfig
+  let archiveDescription = ArchiveDescription (snapshotNum current) (timestamp current) (snapshotNum <$> previous)
   pure ()
-
-main :: IO ()
-main = do
-  args <- getArgs
-  case args of
-    ["provision", "aws"] -> setupConfig "/etc/glacier-backup" >>= flip runReaderResource provisionAWS . snd
-    [fileName] -> main' fileName
-    [] -> main' "/etc/glacier-backup.yml"
-    _ -> error "glacier-backup: Pass in a filename or don't"
-
-setupConfig :: FilePath -> IO (String, GlacierEnv)
-setupConfig configFilePath = do
-  --config <- decodeFileEither configFilePath >>=  either throwIO pure
-  Config{..} <- loadYamlSettings [configFilePath] [confDef] useEnv
-  --let snapper_config = fromMaybe "root" $ snapper_config_name config
-  print snapper_config_name
-  --let account_id = maybe "-" toText $ aws_account_id config
-  --    vault_name = glacier_vault_name config
-  let glacierConfig = GlacierSettings aws_account_id glacier_vault_name
-  lgr <- newLogger Debug stdout
-  awsEnv <- set envRegion region . set envLogger lgr <$> newEnv Discover
-  -- also return the snapper config name
-  pure (snapper_config_name, GlacierEnv awsEnv glacierConfig)
-
---main :: IO ()
-main' configFilePath = do
-  --config <- either (error . show) id <$> decodeFileEither "/etc/glacier-backup.yml"
-  --config <- decodeFileEither "glacier-backup.yml"
-  (snapper_config_name, glacierEnv) <- setupConfig configFilePath
-  --getDeltaRange snapper_config_name
-  pure undefined

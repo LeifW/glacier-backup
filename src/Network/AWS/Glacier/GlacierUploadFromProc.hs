@@ -1,7 +1,7 @@
 {-# LANGUAGE  FlexibleContexts, FlexibleInstances, OverloadedStrings, LambdaCase #-}
 module GlacierUploadFromProc  where
 
-import GlacierReaderT (chunkSizeToBytes, initiate, uploadByChunks, complete, GlacierSettings(..), GlacierEnv(..), HasGlacierSettings, upload, runReaderResource)
+import GlacierReaderT (NumBytes, chunkSizeToBytes, initiate, uploadByChunks, complete, GlacierSettings(..), GlacierEnv(..), HasGlacierSettings, upload, runReaderResource)
 
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
@@ -10,7 +10,7 @@ import Data.Text.Lazy.Encoding (encodeUtf8Builder)
 import Formatting
 import Data.ByteString.Builder (Builder, stringUtf8, intDec, byteString)
 --import System.Process (CreateProcess(..))
-import System.Process (cmdspec)
+import System.Process (cmdspec) -- for logging
 import Control.Lens
 --import Control.Monad.Reader.Class (asks, runReaderT)
 import Control.Monad.Reader
@@ -20,6 +20,9 @@ import Control.Monad.Trans.Resource
 import Control.Monad.Primitive (PrimMonad)
 --import Data.Conduit (ConduitT, Void)
 import Data.Conduit.Process (sourceProcessWithConsumer, CreateProcess, proc)
+import qualified Data.Conduit.Combinators as C
+--import Data.Conduit ((.|))
+--import Data.Conduit.Zlib (gzip)
 import Network.AWS.Glacier (ArchiveCreationOutput)
 import Network.AWS (LogLevel(..))
 import System.IO (stdout)
@@ -44,11 +47,18 @@ glacierSettings = GlacierSettings "-" "test"
 liftedTextLogger :: MonadIO m => Logger -> LogLevel -> Lazy.Text -> m ()
 liftedTextLogger lg level = liftIO . lg level . encodeUtf8Builder
 
+
+{-
+data GlacierArchive = GlacierArchive {
+  archiveId :: Text,
+  size
+-}
+  
 glacierUploadFromProcess :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m)
                          => CreateProcess
                          -> Maybe Text 
                          -> Int -- ^ Chunk Size in MB
-                         -> m ArchiveCreationOutput
+                         -> m (NumBytes, ArchiveCreationOutput)
 glacierUploadFromProcess createProcess archiveDescription chunkSizeMB = do
   logger <- liftedTextLogger <$> view envLogger
   --logger <- (\lg level -> liftIO . lg level . encodeUtf8Builder) <$> view envLogger
@@ -56,11 +66,14 @@ glacierUploadFromProcess createProcess archiveDescription chunkSizeMB = do
   uploadId <- initiate archiveDescription chunkSizeBytes
   --logger Info $ "Uploading " <> builderShow (cmdspec createProcess) <> " w/ uploadId " <> builderText uploadId <> " using a chunk size of " <> intDec chunkSizeMB <> "MB"
   logger Info $ format ("Uploading " % shown % " w/ uploadId " % stext % " using a chunk size of " % int % "MB") (cmdspec createProcess) uploadId chunkSizeMB
-  -- (exitCode, (totalArchiveSize, treeHashChecksum))  <- sourceProcessWithConsumer (proc "cat" ["/home/leif/Downloads/The-Data-Engineers-Guide-to-Apache-Spark.pdf"])$ uploadByChunks chunkSizeBytes uploadId
-  (exitCode, (totalArchiveSize, treeHashChecksum)) <- sourceProcessWithConsumer createProcess $ uploadByChunks chunkSizeBytes uploadId
-  (_, conn) <- allocate (open "test.db") close 
+  (exitCode, (totalArchiveSize, treeHashChecksum))  <- sourceProcessWithConsumer (proc "cat" ["/home/leif/Downloads/The-Data-Engineers-Guide-to-Apache-Spark.pdf"])$ uploadByChunks chunkSizeBytes uploadId
+  --exitCode, bytes) <- sourceProcessWithConsumer createProcess C.fold
+  --(exitCode, (totalArchiveSize, treeHashChecksum)) <- sourceProcessWithConsumer createProcess $ uploadByChunks chunkSizeBytes uploadId
+  --(_, conn) <- allocate (open "test.db") close 
   
-  complete uploadId treeHashChecksum totalArchiveSize
+  completionResp <- complete uploadId treeHashChecksum totalArchiveSize
+  pure (totalArchiveSize, completionResp)
+  --pure undefined
 
 --runGlacier :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m)
 

@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, LambdaCase, RecordWildCards  #-}
-module Snapper (SnapperConfig(..), Snapshot(..), getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
+module Snapper (SnapperConfig(..), Snapshot(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
 import DBus.Client --(Client, call, connectSession, connectSystem)
 import DBus
 import DBus.Generation (clientArgumentUnpackingError)
@@ -9,6 +9,8 @@ import Control.Exception (bracket, throwIO, Exception)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Safe (lastMay)
 import Data.Maybe (fromMaybe)
+
+import Network.AWS.Data.Time (Time(..), ISO8601)
 
 import Data.Text (Text)
 
@@ -57,7 +59,7 @@ data SnapshotRef = SnapshotRef {
   snapshotTime ::  UTCTime
 } deriving (Eq, Show, Generic, Data)
 -}
-type SnapshotRef = Int
+type SnapshotRef = Word32
 
 data UploadStatus = UploadStatus {
   uploadId :: Text,
@@ -66,8 +68,9 @@ data UploadStatus = UploadStatus {
 
 
 data Snapshot = Snapshot {
-  snapshotNum :: Int,
-  timestamp :: UTCTime,
+  snapshotNum :: SnapshotRef,
+  timestamp :: ISO8601,
+  --timestamp :: UTCTime,
   uploadedStatus :: Maybe UploadStatus,
   cleanup :: Cleanup,
   description :: Maybe String
@@ -99,9 +102,12 @@ instance IsVariant (Maybe String) where
   toVariant = toVariant . maybeToString
   fromVariant v = stringToMaybe <$> fromVariant v
 
+timeFromTimestamp :: Integral a => a -> Time format
+timeFromTimestamp = Time . posixSecondsToUTCTime . fromIntegral 
+
 --snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
 snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, String, Map String String) -> Snapshot
-snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime) Nothing (cleanupFromString cleanup) (stringToMaybe  description)
+snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (timeFromTimestamp timestamp) Nothing (cleanupFromString cleanup) (stringToMaybe  description)
 -- TODO Replace the above Nothingwith uploadStatus, extractedfrom userdata
 --snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
 
