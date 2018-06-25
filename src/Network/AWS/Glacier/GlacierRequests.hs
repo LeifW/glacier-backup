@@ -1,44 +1,50 @@
 {-# LANGUAGE OverloadedStrings #-}
-module GlacierRequests (initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart) where
+module GlacierRequests (NumBytes, PartSize, getNumBytes, UploadId, initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart) where
 
 import Data.Int (Int64)
+import Data.Maybe (fromMaybe)
 
 import Control.Monad.Trans.AWS (AWSConstraint, send)
 import qualified Network.AWS.Glacier as Amazonka
-import Network.AWS.Glacier (ArchiveCreationOutput, UploadMultipartPartResponse, InitiateMultipartUploadResponse, imuArchiveDescription)
+import Network.AWS.Glacier (ArchiveCreationOutput, UploadMultipartPartResponse, InitiateMultipartUploadResponse, imuArchiveDescription, imursUploadId)
 import Network.AWS.Data.Text (toText)
 import Network.AWS.Data.Body (ToHashedBody, toHashed)
 import Network.AWS.Data.Crypto (Digest, SHA256)
 
 import Data.Text (Text)
 
-import Control.Lens (set)
+import Control.Lens -- (set)
 
 import Formatting
 
+import AllowedPartSizes (PartSize, getNumBytes)
+
 type NumBytes = Int64
+
+newtype UploadId = UploadId Text
 
 initiateMultipartUpload :: (AWSConstraint r m)
        => Text 
        -> Text 
        -> Maybe Text 
-       -> Int
-       -> m InitiateMultipartUploadResponse
-initiateMultipartUpload accountId vaultName archiveDescription chunkSizeBytes = send $
-  set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText chunkSizeBytes)
+       -> PartSize
+       -> m UploadId
+initiateMultipartUpload accountId vaultName archiveDescription partSize = do
+  resp <- send $ set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText partSize)
+  pure $ UploadId $ fromMaybe (error "upload: No UploadId on initiate response") $ resp ^. imursUploadId
 
 completeMultipartUpload :: (AWSConstraint r m)
        => Text 
        -> Text 
-       -> Text 
+       -> UploadId 
        -> NumBytes
        -> Digest SHA256
        -> m ArchiveCreationOutput
-completeMultipartUpload  accountId vaultName uploadId totalArchiveSize treeHashChecksum  = send $ Amazonka.completeMultipartUpload 
+completeMultipartUpload  accountId vaultName (UploadId uploadId) totalArchiveSize treeHashChecksum  = send $ Amazonka.completeMultipartUpload 
   accountId vaultName uploadId (toText totalArchiveSize) (toText treeHashChecksum)
 
-uploadMultipartPart :: (AWSConstraint r m, ToHashedBody a) => Text -> Text -> Text -> (NumBytes, NumBytes) -> Digest SHA256 -> a -> m UploadMultipartPartResponse
-uploadMultipartPart accountId vaultName uploadId byteRange checksum body  = send $ Amazonka.uploadMultipartPart
+uploadMultipartPart :: (AWSConstraint r m, ToHashedBody a) => Text -> Text -> UploadId -> (NumBytes, NumBytes) -> Digest SHA256 -> a -> m UploadMultipartPartResponse
+uploadMultipartPart accountId vaultName (UploadId uploadId) byteRange checksum body  = send $ Amazonka.uploadMultipartPart
   accountId
   vaultName
   uploadId

@@ -29,7 +29,7 @@ import Network.AWS (LogLevel(..))
 import GlacierReaderT
 import GlacierUploadFromProc
 import Snapper
-import AllowedChunkSizes
+import AllowedPartSizes (PartSize)
 
 
 --app_name :: String
@@ -39,7 +39,7 @@ data Config = Config {
   snapper_config_name :: String, -- Defaults to "root"
   region :: Region,
   glacier_vault_name :: Text,
-  upload_chunk_size_MB :: ChunkSizeMB,
+  upload_part_size_MB :: PartSize,
   aws_account_id :: Text -- A 12-digit number, defaults to account of credentials. (-)
   --aws_account_id :: Maybe Int64 -- A 12-digit number, defaults to account of credentials. (-)
 } deriving (Show, Generic, FromJSON)
@@ -48,7 +48,7 @@ confDef :: Value
 confDef = object [
     ("snapper_config_name", "root"),
     ("aws_account_id",      "-"),
-    ("upload_chunk_size_MB", toJSON @Int 64)
+    ("upload_part_size_MB", toJSON @Int 64)
   ]
 
 --runDBusWithSettings :: (HasGlacierSettings r, MonadReader r m => 

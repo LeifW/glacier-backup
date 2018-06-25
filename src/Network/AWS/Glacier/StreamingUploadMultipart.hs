@@ -157,7 +157,7 @@ upload accountId vaultName archiveDescription chunkSizeMB = do
 --baz :: MonadError AmazonError m => m Int
 --baz = pure 10
 
-uploadByChunks :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m (Int64, Digest SHA256)
+uploadByChunks :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m (NumBytes, Digest SHA256)
 uploadByChunks chunkSizeBytes accountId vaultName uploadId = do
   (sizes, checksums) <- unzip <$> pipeline chunkSizeBytes accountId vaultName uploadId
   pure (sum sizes, treeHashList checksums)
@@ -201,7 +201,7 @@ rangeHeader (start, end) = sformat ("bytes " % int % "-" % int % "/*") start end
   
 
 --uploadChunk :: Text -> Text
-pipeline :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m [(Int64, Digest SHA256)]
+pipeline :: (AWSConstraint r m, PrimMonad m) => Int -> Text -> Text -> Text -> ConduitT ByteString Void m [(NumBytes, Digest SHA256)]
 pipeline chunkSizeBytes accountId vaultName uploadId = 
      gzip
   .| chunksOf chunkSizeBytes
@@ -209,7 +209,7 @@ pipeline chunkSizeBytes accountId vaultName uploadId =
   .| C.mapM uploadChunk
     -- .| C.map (\(i, bs) -> (BS.length bs, hash bs))
   .| C.sinkList
-    where uploadChunk :: (AWSConstraint r m) => (Int,  ByteString) -> m (Int64, Digest SHA256)
+    where uploadChunk :: (AWSConstraint r m) => (Int,  ByteString) -> m (NumBytes, Digest SHA256)
           uploadChunk (sequenceNum, chunk) = do
             let size = BS.length chunk
             let byteRange = range sequenceNum chunkSizeBytes size

@@ -1,13 +1,14 @@
 {-# LANGUAGE  TemplateHaskell #-}
-module LiftedGlacierRequests (initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart) where
+module LiftedGlacierRequests (GlacierSettings(..), HasGlacierSettings(..), PartSize, getNumBytes, NumBytes, UploadId, initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart) where
 
 import Control.Lens (Lens', view, makeLenses)
 
 import Control.Monad.Trans.AWS (AWSConstraint, HasEnv(..), Env)
-import Network.AWS.Glacier (ArchiveCreationOutput, UploadMultipartPartResponse, InitiateMultipartUploadResponse)
+import Network.AWS.Glacier (ArchiveCreationOutput, UploadMultipartPartResponse)
 import Network.AWS.Data.Body (ToHashedBody)
 import Network.AWS.Data.Crypto (Digest, SHA256)
 
+import GlacierRequests (PartSize, getNumBytes, NumBytes, UploadId)
 import qualified GlacierRequests
 
 import Data.Text (Text)
@@ -35,22 +36,22 @@ instance HasEnv GlacierEnv  where
 
 initiateMultipartUpload :: (AWSConstraint r m, HasGlacierSettings r)
        => Maybe Text 
-       -> Int
-       -> m InitiateMultipartUploadResponse
-initiateMultipartUpload archiveDescription chunkSizeBytes = do
+       -> PartSize
+       -> m UploadId
+initiateMultipartUpload archiveDescription partSize = do
   GlacierSettings accountId vaultName <- view glacierSettingsL
-  GlacierRequests.initiateMultipartUpload accountId vaultName archiveDescription chunkSizeBytes 
+  GlacierRequests.initiateMultipartUpload accountId vaultName archiveDescription partSize 
 
 completeMultipartUpload :: (AWSConstraint r m, HasGlacierSettings r)
-       => Text 
-       -> Int
+       => UploadId 
+       -> NumBytes
        -> Digest SHA256
        -> m ArchiveCreationOutput
 completeMultipartUpload  uploadId totalArchiveSize treeHashChecksum = do
   GlacierSettings accountId vaultName <- view glacierSettingsL
   GlacierRequests.completeMultipartUpload accountId vaultName uploadId totalArchiveSize treeHashChecksum
 
-uploadMultipartPart :: (AWSConstraint r m, HasGlacierSettings r, ToHashedBody a) => Text -> (Int, Int) -> Digest SHA256 -> a -> m UploadMultipartPartResponse
+uploadMultipartPart :: (AWSConstraint r m, HasGlacierSettings r, ToHashedBody a) => UploadId -> (NumBytes, NumBytes) -> Digest SHA256 -> a -> m UploadMultipartPartResponse
 uploadMultipartPart uploadId byteRange checksum body  = do 
   GlacierSettings accountId vaultName <- view glacierSettingsL
   GlacierRequests.uploadMultipartPart accountId vaultName uploadId byteRange checksum body
