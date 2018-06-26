@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, LambdaCase, RecordWildCards  #-}
-module Snapper (SnapperConfig(..), Snapshot(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
+{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, RecordWildCards, TupleSections  #-}
+module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
 import DBus.Client --(Client, call, connectSession, connectSystem)
 import DBus
 import DBus.Generation (clientArgumentUnpackingError)
@@ -8,25 +8,25 @@ import qualified Data.Map as Map
 import Control.Exception (bracket, throwIO, Exception)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Safe (lastMay)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, maybeToList)
 
 import Network.AWS.Data.Time (Time(..), ISO8601)
 
-import Data.Text (Text)
+import Data.Text (Text, pack, unpack)
 
 import Data.Word
 import Data.Int
 
-import Data.Time.Clock (UTCTime)
-import Data.Time.Clock.POSIX
+import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.FilePath ((</>))
 
-import Data.Natural
+import Data.Natural (Natural)
 
 import Data.Data (Data)
 import GHC.Generics (Generic)
 
-import Util
+import AmazonkaSupport
+import Util (justIf, eitherToMaybe, maybeToEither, lowerMaybe, raiseToMaybe)
 
 instance IsVariant Natural where
   fromVariant v = case typeOf v of
@@ -66,7 +66,16 @@ data UploadStatus = UploadStatus {
   deltaFrom :: Maybe SnapshotRef
 } deriving (Eq, Show, Generic, Data)
 
+uploadStatusToMap :: UploadStatus -> Map String String
+uploadStatusToMap (UploadStatus id delta) = Map.fromList $
+    ("uploadId", unpack id) :
+    maybeToList (("deltaFrom",) . show <$> delta)
 
+uploadStatusFromMap :: Map String String -> Maybe UploadStatus 
+uploadStatusFromMap m = do
+  uploadId <- pack <$> Map.lookup "uploadId" m
+  Just $ UploadStatus uploadId (read <$> Map.lookup "deltaFrom" m)
+  
 data Snapshot = Snapshot {
   snapshotNum :: SnapshotRef,
   timestamp :: ISO8601,
@@ -92,22 +101,24 @@ instance IsVariant Cleanup where
   toVariant = toVariant . cleanupToString
   fromVariant v = cleanupFromString <$> fromVariant @String v
 
+{-
 stringToMaybe :: String -> Maybe String
-stringToMaybe s = boolToMaybe (not $ null s) s
+stringToMaybe s = justIf (not $ null s) s
 
 maybeToString :: Maybe String -> String
 maybeToString = fromMaybe ""
+-}
 
 instance IsVariant (Maybe String) where
-  toVariant = toVariant . maybeToString
-  fromVariant v = stringToMaybe <$> fromVariant v
+  toVariant = toVariant . lowerMaybe
+  fromVariant v = raiseToMaybe <$> fromVariant v
 
 timeFromTimestamp :: Integral a => a -> Time format
 timeFromTimestamp = Time . posixSecondsToUTCTime . fromIntegral 
 
 --snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
 snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, String, Map String String) -> Snapshot
-snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (timeFromTimestamp timestamp) Nothing (cleanupFromString cleanup) (stringToMaybe  description)
+snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot num (timeFromTimestamp timestamp) (uploadStatusFromMap userdata) (cleanupFromString cleanup) (raiseToMaybe description)
 -- TODO Replace the above Nothingwith uploadStatus, extractedfrom userdata
 --snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
 
@@ -157,7 +168,14 @@ getConfig config = doMethodCall getConfigMethodCall [toVariant config]
 --setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
 --
 setSnapshot :: String -> Snapshot -> Client -> IO ()
-setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [toVariant config, toVariant @Word32 (fromIntegral snapshotNum), toVariant description, toVariant cleanup, toVariant (Map.empty @String @String)]
+setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [
+    toVariant config,
+    toVariant snapshotNum,
+    toVariant description,
+    toVariant cleanup,
+    toVariant $ maybe Map.empty uploadStatusToMap uploadedStatus
+  ]
+--setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [toVariant config, toVariant @Word32 (fromIntegral snapshotNum), toVariant description, toVariant cleanup, toVariant (Map.empty @String @String)]
 --setSnapshot config (Snapshot snapshotNum timestamp description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
 --setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant (50 :: Word32),  toVariant ("" :: String), toVariant userdata]
 
@@ -200,6 +218,7 @@ getLastSnapshot config client = lastSnapshot <$> listSnapshots config client
 --  pure $ lastSnapshot snapshots
   --pure $ nthSnapshotOnSubvolume subvolume <$> lastSnapshot snapshots
 
+-- TODO: Replace the error's with something more seemly
 convertDBusResult :: IsVariant a => [Variant] -> Either MethodError a
 convertDBusResult [] = maybeToEither (error  "Only Unit is supported as a return type for no results") $ fromVariant $ toVariant ()
 --convertDBusResult [] = maybeToEither (clientArgumentUnpackingError []) $ fromVariant $ toVariant ()

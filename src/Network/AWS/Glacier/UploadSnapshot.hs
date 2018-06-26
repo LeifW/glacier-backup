@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications, RecordWildCards, DataKinds, FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications, RecordWildCards, DataKinds, FlexibleInstances, DisambiguateRecordFields #-}
 module UploadSnapshot where
 
 import Control.Exception
@@ -32,6 +32,7 @@ import Network.AWS.Data.Time -- (Time, ISO8601)
 import GlacierReaderT
 import GlacierUploadFromProc
 import Snapper
+import SimpleDB (getLatestUpload)
 
 import qualified Data.Csv as Csv
 import Data.Map (Map, fromList) 
@@ -58,7 +59,7 @@ btrfsSendToGlacier parent snapshot = glacierUploadFromProcess (btrfsSendCmd pare
 -- Is there more than 1 full upload, and if so, is the oldest one over 90 days old?
 
 --shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m Bool
-shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m (Maybe UTCTime)
+shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m (Maybe ISO8601)
 shouldCreateNewFullBackup = do
   -- SELECT date FROM vaultName_uploads WHERE previous = NULL
   -- If none return None
@@ -66,17 +67,17 @@ shouldCreateNewFullBackup = do
     --   How many incremental uploads have been applied on top of the most recent one?
     --   Over n? Return None, to create a new one.
     --  Also while we're here: If more than one, check if the older one(s) are over 90 days old, and delete them.
-  pure undefined
+  pure Nothing
   
 --This is only called if shouldcreate found a full upload, so there's at least one upload
-getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Maybe Snapshot)
-getLastUpload = pure undefined -- ask simpledb
+--getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Maybe Snapshot)
+--getLastUpload = pure undefined -- ask simpledb
 
 -- You've gotta have at least one snapshot already or we're quitting.
 data E = E deriving (Typeable, Show)
 instance Exception E
 
-getDeltaRange :: (AWSConstraint r m, HasGlacierSettings r) => String -> m (Maybe Snapshot, Snapshot)
+getDeltaRange :: (AWSConstraint r m, HasGlacierSettings r) => String -> m (Maybe SnapshotRef, Snapshot)
 getDeltaRange snapperConfig = do
   -- get snapper config: subvolume path
   -- is there an existing snapshot according to snapper?
@@ -90,7 +91,7 @@ getDeltaRange snapperConfig = do
   doFullBackup <- shouldCreateNewFullBackup
   -- Technically the join isn't needed - we know getLastUpload will have at least one item if there's already a full backup uploaded.
   -- Could also use >>= of MaybeT
-  previousSnapshot <- join <$> traverse (const getLastUpload) doFullBackup
+  previousSnapshot <- join <$> traverse (const getLatestUpload) doFullBackup
   --previousSnapshot <- sequence $ doFullBackup >>= (const getLastUpload)
   --previousSnapshot <- if doFullBackup then pure Nothing else Just getLatestUpload
   --fullBackup <- createNewFullBackup
@@ -116,5 +117,5 @@ data ArchiveDescription = ArchiveDescription {
 uploadBackup :: (AWSConstraint r m, HasGlacierSettings r) => String -> m ()
 uploadBackup snapperConfig = do
   (previous, current) <- getDeltaRange snapperConfig
-  let archiveDescription = ArchiveDescription (snapshotNum current) (timestamp current) (snapshotNum <$> previous)
+  let archiveDescription = ArchiveDescription (snapshotNum current) (timestamp current) (previous)
   pure ()

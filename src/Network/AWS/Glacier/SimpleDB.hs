@@ -1,8 +1,9 @@
 {-# LANGUAGE DeriveGeneric, DeriveDataTypeable, StandaloneDeriving, FlexibleInstances, PackageImports, TypeApplications, RecordWildCards, OverloadedStrings #-}
-module SimpleDB where
+module SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload) where
 
 import Safe (headMay)
 
+import Data.Maybe (maybeToList)
 --import Network.AWS (MonadAWS, runAWS, AWS, liftAWS, Credentials(..), Region(..), HasEnv, environment)
 import Control.Monad.Trans.AWS (runAWST, runResourceT, AWST, AWST', AWSConstraint, send, Env, LogLevel(..), newLogger, envLogger, envRegion, newEnv)
 import Network.AWS.SDB
@@ -10,30 +11,26 @@ import Network.AWS.Data.Text
 import Network.AWS.Data.Time
 
 import Control.Lens
-import Control.Monad ((>=>), (<=<))
+import Control.Monad (void, (>=>), (<=<))
 import Control.Monad.Catch (MonadThrow, Exception, throwM)
 import Data.Bifunctor
 
 import Data.Int (Int64)
 import Data.Text (Text)
 import Data.ByteString (ByteString)
---import Data.Maybe (maybeToList)
-import Data.Foldable (toList)
-import Network.AWS.Data.Crypto -- (Digest(..), SHA256)
-import "cryptonite" Crypto.Hash
+import "cryptonite" Crypto.Hash (Digest, SHA256, HashAlgorithm, digestFromByteString)
 import Data.ByteArray.Encoding
 import Data.Text.Encoding (encodeUtf8)
---import "cryptonite" Crypto.Hash.Types
-import Basement.Block (Block(..))
-import Data.Word (Word8)
 import Unsafe.Coerce (unsafeCoerce)
 
-import Data.Data --(Data)
+import Data.Data (Data)
 import GHC.Generics (Generic)
-import Type.Reflection --(Typeable)
 
-import GlacierReaderT
-import Snapper --(SnapshotRef)
+import GlacierReaderT (HasGlacierSettings(..), _vaultName)
+import MultipartGlacierUpload (GlacierUpload(..))
+import Snapper (Snapshot(..), UploadStatus(deltaFrom), SnapshotRef)
+--import Snapper (UploadStatus(deltaFrom), SnapshotRef)
+import ArchiveSnapshotDescription
 
 import Util
 
@@ -53,12 +50,6 @@ instance Typeable a => Data (Digest a) where
 -}
 
     --gfoldl k z digest = unsafeCoerce $ gfoldl @(Block Word8) k z (unsafeCoerce digest)
--- It's a newtype for a block of memory.
-instance Typeable a => Data (Digest a) where
-    gunfold _ _ = error "gunfold"
-    toConstr _ = error "toConstr"
-    dataTypeOf _ = mkNoRepType "Crypto.Hash.Types.Digest"
-    --gfoldl k z digest = z (unsafeCoerce @(Block Word8) @(Digest SHA256)) `k` (unsafeCoerce @(Digest SHA256) @(Block Word8) digest)
 
 --digestConstructor = mkConstr digestType "Digest" [] Prefix
 --digestType = mkNoRepType "Crypto.Hash.Types.Digest"
@@ -71,6 +62,19 @@ digestFromHex = maybeToEither "Can't parse Digest from bytes" . digestFromByteSt
                 convertFromBase @ByteString @ByteString Base16 . encodeUtf8
 
 data SnapshotUpload = SnapshotUpload {
+  glacierUpload :: GlacierUpload,
+  snapshotInfo :: ArchiveSnapshotDescription
+} deriving (Show, Data, Generic)
+{-
+data SnapshotUpload = SnapshotUpload {
+  glacierUpload :: GlacierUpload,
+  snapshotNum :: SnapshotRef,
+  timestamp :: ISO8601,
+  previous :: Maybe SnapshotRef
+} deriving (Show, Data, Generic)
+-}
+{-
+data SnapshotUpload = SnapshotUpload {
   archiveId :: Text,
   size :: Int64,
   checksum :: Digest SHA256,
@@ -78,6 +82,7 @@ data SnapshotUpload = SnapshotUpload {
   timestamp :: ISO8601,
   previous :: Maybe SnapshotRef
 } deriving (Show, Eq, Data, Generic)
+-}
 
 instance ToJSON (Digest SHA256) where
   toJSON sha = String $ toText sha
@@ -91,16 +96,18 @@ fromISOTime :: Text -> Either String UTCTime
 fromISOTime t = fromTime <$> fromText @ISO8601 t
 
 glacierUploadToItem :: Text -> SnapshotUpload -> PutAttributes
-glacierUploadToItem domainName SnapshotUpload{..} = putAttributes domainName (toText snapshotNum) & set paAttributes ([
+glacierUploadToItem domainName (SnapshotUpload glacierUpload snapshotInfo) = putAttributes domainName (toText currentSnapshotNum) & set paAttributes ([
     replaceableAttribute "archiveId" archiveId,
     replaceableAttribute "size" (toText size),
-    replaceableAttribute "checksum" (toText checksum),
+    replaceableAttribute "treeHashChecksum" (toText treeHashChecksum),
     replaceableAttribute "timestamp" (toText timestamp)
-  ] ++ (toList previous >>= \num -> [
-          replaceableAttribute "previousSnapshot" (toText num)
-        ])
+  ] ++ (replaceableAttribute "previousSnapshot" . toText <$> maybeToList previousSnapshotNum)
   )
-  
+  where
+    GlacierUpload archiveId treeHashChecksum size = glacierUpload
+    ArchiveSnapshotDescription currentSnapshotNum timestamp previousSnapshotNum = snapshotInfo
+    --previous = uploadedStatus snapshot >>= deltaFrom
+
 
 attributeToPair :: Attribute -> (Text, Text)
 attributeToPair a = (a ^. aName, a ^. aValue)
@@ -119,11 +126,10 @@ lookupFromItem k item = lookupEither k (map attributeToPair $ item ^. iAttribute
 snapshotIdFromItem :: Item -> Either String SnapshotRef
 snapshotIdFromItem item = fromText $ item ^. iName
 
-insertItem :: (AWSConstraint r m, HasGlacierSettings r) => SnapshotUpload -> m ()
-insertItem row = do
+insertSnapshotUpload :: (AWSConstraint r m, HasGlacierSettings r) => SnapshotUpload -> m ()
+insertSnapshotUpload row = do
   vaultName <- _vaultName <$> view glacierSettingsL  
-  resp <- send $ glacierUploadToItem vaultName row
-  pure ()
+  void $ send $ glacierUploadToItem vaultName row
 
 throwEither :: (MonadThrow m, Exception e) => Either e a -> m a
 throwEither = either throwM pure

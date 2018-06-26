@@ -30,7 +30,6 @@ import System.IO (stdout)
 import Control.Monad.Trans.AWS
 
 
-import           Database.SQLite.Simple
 
 glacierSettings :: GlacierSettings
 glacierSettings = GlacierSettings "-" "test"
