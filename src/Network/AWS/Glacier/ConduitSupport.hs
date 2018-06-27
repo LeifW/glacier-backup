@@ -3,7 +3,6 @@ module ConduitSupport where
 
 import Data.ByteString (ByteString)
 import Data.Conduit (ConduitT, (.|), await, yield)
-import Control.Monad.Trans.Class (lift)
 import Control.Monad.Primitive (PrimMonad)
 
 import Data.Vector.Storable (Vector, unsafeToForeignPtr)

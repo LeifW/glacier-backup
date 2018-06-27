@@ -1,12 +1,14 @@
 {-# LANGUAGE DeriveGeneric, DeriveDataTypeable, StandaloneDeriving, FlexibleInstances, PackageImports, TypeApplications, RecordWildCards, OverloadedStrings #-}
-module SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload) where
+module SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload, createDomain) where
 
 import Safe (headMay)
 
 import Data.Maybe (maybeToList)
 --import Network.AWS (MonadAWS, runAWS, AWS, liftAWS, Credentials(..), Region(..), HasEnv, environment)
 import Control.Monad.Trans.AWS (runAWST, runResourceT, AWST, AWST', AWSConstraint, send, Env, LogLevel(..), newLogger, envLogger, envRegion, newEnv)
-import Network.AWS.SDB
+--import Network.AWS.SDB (Item, PutAttributes, Attribute, putAttributes, replaceableAttribute, paAttributes, aName, aValue, iName, iAttributes)
+import Network.AWS.SDB hiding (createDomain)
+import qualified Network.AWS.SDB as SDB
 import Network.AWS.Data.Text
 import Network.AWS.Data.Time
 
@@ -26,8 +28,7 @@ import Unsafe.Coerce (unsafeCoerce)
 import Data.Data (Data)
 import GHC.Generics (Generic)
 
-import GlacierReaderT (HasGlacierSettings(..), _vaultName)
-import MultipartGlacierUpload (GlacierUpload(..))
+import MultipartGlacierUpload (GlacierUpload(..),  HasGlacierSettings(..), _vaultName)
 import Snapper (Snapshot(..), UploadStatus(deltaFrom), SnapshotRef)
 --import Snapper (UploadStatus(deltaFrom), SnapshotRef)
 import ArchiveSnapshotDescription
@@ -62,7 +63,7 @@ digestFromHex = maybeToEither "Can't parse Digest from bytes" . digestFromByteSt
                 convertFromBase @ByteString @ByteString Base16 . encodeUtf8
 
 data SnapshotUpload = SnapshotUpload {
-  glacierUpload :: GlacierUpload,
+  glacierUploadResult :: GlacierUpload,
   snapshotInfo :: ArchiveSnapshotDescription
 } deriving (Show, Data, Generic)
 {-
@@ -128,8 +129,14 @@ snapshotIdFromItem item = fromText $ item ^. iName
 
 insertSnapshotUpload :: (AWSConstraint r m, HasGlacierSettings r) => SnapshotUpload -> m ()
 insertSnapshotUpload row = do
-  vaultName <- _vaultName <$> view glacierSettingsL  
-  void $ send $ glacierUploadToItem vaultName row
+  domainName <- _vaultName <$> view glacierSettingsL  
+  void $ send $ glacierUploadToItem domainName row
+
+createDomain :: (AWSConstraint r m, HasGlacierSettings r) => m ()
+createDomain = do
+  domainName <- _vaultName <$> view glacierSettingsL  
+  void $ send $ SDB.createDomain domainName
+  
 
 throwEither :: (MonadThrow m, Exception e) => Either e a -> m a
 throwEither = either throwM pure

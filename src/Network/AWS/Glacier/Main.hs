@@ -26,10 +26,15 @@ import Data.Conduit.Process (CreateProcess, proc)
 import Control.Monad.Primitive (PrimMonad)
 import Network.AWS.Glacier (ArchiveCreationOutput)
 import Network.AWS (LogLevel(..))
-import GlacierReaderT
+--import GlacierReaderT
 import GlacierUploadFromProc
+import LiftedGlacierRequests (GlacierEnv(..), GlacierSettings(..))
+import AmazonkaSupport (runReaderResource)
 import Snapper
 import AllowedPartSizes (PartSize)
+import UploadSnapshot
+
+import Control.Concurrent
 
 
 --app_name :: String
@@ -51,6 +56,7 @@ confDef = object [
     ("upload_part_size_MB", toJSON @Int 64)
   ]
 
+{-
 --runDBusWithSettings :: (HasGlacierSettings r, MonadReader r m => 
 
 -- Talk to Snapper (over DBus) and SimpleDB to figure out where we're at.
@@ -113,19 +119,17 @@ data ArchiveDescription = ArchiveDescription {
   timestamp :: UTCTime,
   previous :: Maybe SnapshotRef
 } deriving (Show, Generic)
-
-uploadBackup :: (AWSConstraint r m, HasGlacierSettings r) => String -> m ()
-uploadBackup snapperConfig = do
-  (previous, current) <- getDeltaRange snapperConfig
-  pure ()
+-}
 
 main :: IO ()
 main = do
   args <- getArgs
   case args of
-    ["provision", "aws"] -> setupConfig "/etc/glacier-backup" >>= flip runReaderResource provisionAWS . snd
+    ["provision", "aws"] -> setupConfig "glacier-backup.yml" >>= flip runReaderResource provisionAWS . snd
+    --["provision", "aws"] -> setupConfig "/etc/glacier-backup" >>= flip runReaderResource provisionAWS . snd
     [fileName] -> main' fileName
-    [] -> main' "/etc/glacier-backup.yml"
+    [] -> main' "glacier-backup.yml"
+    --[] -> main' "/etc/glacier-backup.yml"
     _ -> error "glacier-backup: Pass in a filename or don't"
 
 setupConfig :: FilePath -> IO (String, GlacierEnv)
@@ -136,7 +140,7 @@ setupConfig configFilePath = do
   print snapper_config_name
   --let account_id = maybe "-" toText $ aws_account_id config
   --    vault_name = glacier_vault_name config
-  let glacierConfig = GlacierSettings aws_account_id glacier_vault_name
+  let glacierConfig = GlacierSettings aws_account_id glacier_vault_name upload_part_size_MB 
   lgr <- newLogger Debug stdout
   awsEnv <- set envRegion region . set envLogger lgr <$> newEnv Discover
   -- also return the snapper config name
@@ -148,4 +152,5 @@ main' configFilePath = do
   --config <- decodeFileEither "glacier-backup.yml"
   (snapper_config_name, glacierEnv) <- setupConfig configFilePath
   --getDeltaRange snapper_config_name
-  pure undefined
+  runReaderResource glacierEnv $ uploadBackup snapper_config_name
+  --threadDelay 10000000

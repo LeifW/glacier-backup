@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, RecordWildCards, TupleSections  #-}
-module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot) where
+module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
 import DBus.Client --(Client, call, connectSession, connectSystem)
 import DBus
 import DBus.Generation (clientArgumentUnpackingError)
