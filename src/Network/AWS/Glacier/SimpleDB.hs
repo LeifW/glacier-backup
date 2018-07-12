@@ -1,9 +1,12 @@
 {-# LANGUAGE DeriveGeneric,  FlexibleInstances, PackageImports, TypeApplications, OverloadedStrings #-}
-module SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload, createDomain, listDom, select, runSdbInAmazonka) where
+module SimpleDB (SnapshotUpload(..), getLatestUpload, listUploads, insertSnapshotUpload, createDomain, listDom, select, runSdbInAmazonka) where
 
 import Safe (headMay)
 
 import Unsafe.Coerce (unsafeCoerce)
+
+import Control.Monad.IO.Class (liftIO)
+
 
 import Data.Maybe (maybeToList)
 import Network.AWS.Env (envAuth, envLogger, envRegion)
@@ -150,6 +153,13 @@ throwEither = either throwM pure
 data SimpleDBParseException = SimpleDBParseException String deriving Show
 
 instance Exception SimpleDBParseException
+
+listUploads :: (GlacierConstraint r m) => m ()
+listUploads = do
+  vaultName <- _vaultName <$> view glacierSettingsL  
+  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName <> " WHERE timestamp IS NOT NULL ORDER BY timestamp"
+  mapM_ (liftIO . print) items
+  pure ()
 
 getLatestUpload :: (GlacierConstraint r m) => m (Maybe SnapshotRef)
 getLatestUpload = do

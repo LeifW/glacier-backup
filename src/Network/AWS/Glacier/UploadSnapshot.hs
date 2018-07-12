@@ -1,4 +1,4 @@
-module UploadSnapshot (provisionAWS, uploadBackup) where
+module UploadSnapshot (provisionAWS, listUploads, uploadBackup) where
 
 import Control.Exception
 import Type.Reflection (Typeable)
@@ -11,7 +11,7 @@ import System.Process (CmdSpec(RawCommand))
 import LiftedGlacierRequests (UploadId, createVault)
 import GlacierUploadFromProc
 import Snapper (SnapshotRef, UploadStatus(UploadStatus), Snapshot(_timestamp),  runSystemDBus, createSnapshot, setUploadStatus, getSubvolumeFromConfig, nthSnapshotOnSubvolume)
-import SimpleDB (SnapshotUpload(SnapshotUpload), getLatestUpload, insertSnapshotUpload, createDomain)
+import SimpleDB (SnapshotUpload(SnapshotUpload), getLatestUpload, insertSnapshotUpload, createDomain, listUploads)
 import ArchiveSnapshotDescription(ArchiveSnapshotDescription(ArchiveSnapshotDescription))
 
 
@@ -82,17 +82,6 @@ provisionAWS :: (GlacierConstraint r m) => m ()
 provisionAWS = do
   createVault
   createDomain
-
-{-
-data ArchiveDescription = ArchiveDescription {
-  _current :: SnapshotRef,
-  _timestamp :: ISO8601,
-  _previous :: Maybe SnapshotRef
-} deriving (Show, Generic)
--}
-
---instance FromText ArchiveDescription where
---  toText b = stripEnd $ toText $ toBS $ Csv.encode [b]
 
 uploadBackup :: (GlacierConstraint r m, PrimMonad m)  => String -> m ()
 uploadBackup snapperConfigName = do
