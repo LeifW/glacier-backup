@@ -1,17 +1,17 @@
-{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, RecordWildCards, TupleSections, TemplateHaskell #-}
+{-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveGeneric, RecordWildCards, TypeApplications, TupleSections #-}
+--{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, getSnapshot, setSnapshot, setUploadStatus, createSnapshot, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
 
-import Control.Lens.TH (makeLenses)
+import Control.Lens.Lens (Lens', lens)
 import Control.Lens.Setter
-import DBus.Client --(Client, call, connectSession, connectSystem)
+import DBus.Client (Client, call, connectSession, connectSystem, disconnect)
 import DBus
-import DBus.Generation (clientArgumentUnpackingError)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Control.Exception (bracket, throwIO, Exception)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Safe (lastMay)
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (maybeToList)
 
 import Network.AWS.Data.Time (Time(..), ISO8601)
 import Network.AWS.Data.Text (toText, fromText)
@@ -25,22 +25,11 @@ import Data.Int
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.FilePath ((</>))
 
-import Data.Natural (Natural)
-
-import Data.Data (Data)
 import GHC.Generics (Generic)
 
-import AmazonkaSupport
-import Util (justIf, eitherToMaybe, maybeToEither, lowerMaybe, raiseToMaybe)
+import Util (maybeToEither, lowerMaybe, raiseToMaybe)
 
-instance IsVariant Natural where
-  fromVariant v = case typeOf v of
-                    TypeWord8  ->  fromIntegral <$> fromVariant @Word8 v
-                    TypeWord16  -> fromIntegral <$> fromVariant @Word16 v
-                    TypeWord32  -> fromIntegral <$> fromVariant @Word32 v
-                    TypeWord64  -> fromIntegral <$> fromVariant @Word64 v
-                    _ -> Nothing --error $ "Unexpected type " ++ show other
-               
+import AmazonkaSupport ()
 
 runSystemDBus :: MonadIO m => (Client -> IO a) -> m a 
 runSystemDBus = liftIO . bracket connectSystem disconnect
@@ -64,24 +53,18 @@ setSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "SetSnapsho
 createSnapshotMethodCall :: MethodCall
 createSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "CreateSingleSnapshot" }
 
-{-
-data SnapshotRef = SnapshotRef {
-  snapshotNum :: Int,
-  snapshotTime ::  UTCTime
-} deriving (Eq, Show, Generic, Data)
--}
 type SnapshotRef = Word32
 
 data UploadStatus = UploadStatus {
   _archiveId :: Text,
   _deltaFrom :: Maybe SnapshotRef
-} deriving (Eq, Show, Generic, Data)
+} deriving (Eq, Show, Generic)
 
-makeLenses 'UploadStatus
+--makeLenses 'UploadStatus
 
 uploadStatusToMap :: UploadStatus -> Map Text Text
-uploadStatusToMap (UploadStatus id delta) = Map.fromList $
-    ("archiveId", T.take 7 id) : -- the Glacier archive IDs are super long and will make the snapper table view wrap. So truncate them.
+uploadStatusToMap (UploadStatus archiveId delta) = Map.fromList $
+    ("archiveId", T.take 7 archiveId) : -- the Glacier archive IDs are super long and will make the snapper table view wrap. So truncate them.
     maybeToList (("deltaFrom",) . toText <$> delta)
 
 uploadStatusFromMap :: Map Text Text -> Maybe UploadStatus 
@@ -89,7 +72,7 @@ uploadStatusFromMap m = do
   archiveId <- Map.lookup "archiveId" m
   Just $ UploadStatus archiveId (either (error . ("Can't parse number : " ++) ) id . fromText <$> Map.lookup "deltaFrom" m)
 
-data Cleanup = Number | Timeline | None | GlacierBackup deriving (Eq, Show, Generic, Data)
+data Cleanup = Number | Timeline | None | GlacierBackup deriving (Eq, Show, Generic)
   
 data Snapshot = Snapshot {
   _snapshotNum :: SnapshotRef,
@@ -98,10 +81,10 @@ data Snapshot = Snapshot {
   _uploadedStatus :: Maybe UploadStatus,
   _cleanup :: Cleanup,
   _description :: Maybe Text
-} deriving (Eq, Show, Generic, Data)
+} deriving (Eq, Show, Generic)
 
-makeLenses 'Snapshot
-
+uploadedStatus :: Lens' Snapshot (Maybe UploadStatus)
+uploadedStatus = lens _uploadedStatus (\s us -> s { _uploadedStatus = us } )
 
 cleanupToString :: Cleanup -> Text
 cleanupToString Number = "number"
@@ -119,14 +102,6 @@ instance IsVariant Cleanup where
   toVariant = toVariant . cleanupToString
   fromVariant v = cleanupFromString <$> fromVariant @Text v
 
-{-
-stringToMaybe :: String -> Maybe String
-stringToMaybe s = justIf (not $ null s) s
-
-maybeToString :: Maybe String -> String
-maybeToString = fromMaybe ""
--}
-
 instance IsVariant (Maybe String) where
   toVariant = toVariant . lowerMaybe
   fromVariant v = raiseToMaybe <$> fromVariant v
@@ -141,7 +116,6 @@ timeFromTimestamp = Time . posixSecondsToUTCTime . fromIntegral
 --snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
 snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, Text, Text, Map Text Text) -> Snapshot
 snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot num (timeFromTimestamp timestamp) (uploadStatusFromMap userdata) (cleanupFromString cleanup) (raiseToMaybe description)
--- TODO Replace the above Nothingwith uploadStatus, extractedfrom userdata
 --snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
 
 instance IsVariant Snapshot where
@@ -194,10 +168,6 @@ createSnapshot config description = doMethodCall createSnapshotMethodCall [
 --getConfig :: String -> Client -> IO (Either MethodError (String, String, Map String String))
 getConfig :: String -> Client -> IO SnapperConfig
 getConfig config = doMethodCall getConfigMethodCall [toVariant config]
-
---setSnapshot :: String -> Snapshot -> String -> Cleanup -> Map String String -> Client -> IO String
---setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
---
 
 
 getSnapshot :: String -> SnapshotRef -> Client -> IO Snapshot

@@ -4,15 +4,13 @@ module GlacierRequests (NumBytes, PartSize(getNumBytes), UploadId(..), JobId(..)
 
 import Control.Monad.IO.Class
 import Data.Int (Int64)
-import Data.Maybe (fromMaybe)
 
---import Control.Monad.Trans.AWS (AWSConstraint, send, runResourceT)
-import Control.Monad.Trans.AWS
+import Control.Monad.Trans.AWS (AWSConstraint, HasEnv, send, runResourceT)
 import qualified Network.AWS.Glacier as Amazonka
 import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Catch
-import Network.AWS.Glacier (JobParameters(..), InitiateJobResponse, GetJobOutputResponse, imuArchiveDescription, imursUploadId, acoArchiveId)
+import Network.AWS.Glacier (JobParameters, InitiateJobResponse, GetJobOutputResponse, imuArchiveDescription, imursUploadId, acoArchiveId)
 import Network.AWS.Data.Text (toText)
 import Network.AWS.Data.Body (ToHashedBody, toHashed)
 import Network.AWS.Data.Crypto (Digest, SHA256)
@@ -22,13 +20,11 @@ import Database.SQLite.Simple.ToField
 
 import Data.Text (Text)
 
-import Control.Lens -- (set)
+import Control.Lens
 
 import Formatting
 
 import AllowedPartSizes (PartSize, getNumBytes)
-
-import Control.DeepSeq
 
 type NumBytes = Int64
 

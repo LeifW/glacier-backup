@@ -1,44 +1,19 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, TypeApplications, RecordWildCards, DataKinds, FlexibleInstances, DisambiguateRecordFields #-}
-module UploadSnapshot where
+module UploadSnapshot (provisionAWS, uploadBackup) where
 
 import Control.Exception
 import Type.Reflection (Typeable)
-import System.Environment (getArgs)
-import System.IO (stdout)
-import Data.Maybe (fromMaybe)
-import Data.Text (Text, stripEnd)
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
---import Data.Int (Int64)
-import Data.Time.Clock (UTCTime)
+import Data.Text (Text)
 
-import Control.Monad.IO.Unlift
-
-import GHC.Generics (Generic)
-import Data.Yaml --(FromJSON, toJSON)
-import Data.Yaml.Config (loadYamlSettings, useEnv)
-
-import Control.Monad.Trans.AWS --(AWSConstraint, Credentials(..))
-import Control.Monad.Catch (throwM)
-import Control.Monad.IO.Class (liftIO)
-import Control.Lens.Setter (set)
 import Network.AWS.Data.Text
-import Network.AWS.Data.ByteString
 
-import Database.SQLite.Simple
-
-import Data.Conduit.Process (CreateProcess, CmdSpec(..), proc, shell)
 import Control.Monad.Primitive (PrimMonad)
-import Network.AWS.Glacier (ArchiveCreationOutput)
-import Network.AWS (LogLevel(..))
+import System.Process (CmdSpec(RawCommand))
 import LiftedGlacierRequests (UploadId, createVault)
-import GlacierRequests (UploadId(UploadId))
 import GlacierUploadFromProc
 import Snapper (SnapshotRef, UploadStatus(UploadStatus), Snapshot(_timestamp),  runSystemDBus, createSnapshot, setUploadStatus, getSubvolumeFromConfig, nthSnapshotOnSubvolume)
-import SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload, createDomain)
+import SimpleDB (SnapshotUpload(SnapshotUpload), getLatestUpload, insertSnapshotUpload, createDomain)
 import ArchiveSnapshotDescription(ArchiveSnapshotDescription(ArchiveSnapshotDescription))
 
-import qualified Data.Csv as Csv
-import Data.Map (Map, fromList) 
 
 btrfsSendCmd :: Maybe FilePath -> FilePath -> CmdSpec
 btrfsSendCmd parent snapshot = RawCommand "sudo" $ ["btrfs", "send", "-q"] ++ maybe [] (\p -> ["-p", p]) parent ++ [snapshot]
@@ -51,10 +26,6 @@ btrfsSendToGlacier :: (GlacierConstraint r m, PrimMonad m)
                       -> m GlacierUpload
 btrfsSendToGlacier parent snapshot = glacierUploadFromProcess (btrfsSendCmd parent snapshot)
 
-maybeWhen :: Applicative m => Bool -> m (Maybe a) -> m (Maybe a)
-maybeWhen True f = f
-maybeWhen False _ = pure Nothing
-    
 -- Talk to Snapper (over DBus) and SimpleDB to figure out where we're at.
 -- Err, give the 
 -- SELECT (snapshotNum, date) FROM uploads SORT BY date LIMIT 1

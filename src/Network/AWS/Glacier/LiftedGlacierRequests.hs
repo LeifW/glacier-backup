@@ -5,7 +5,7 @@ import Data.ByteString (ByteString)
 import Control.Lens --(Lens', view, makeLenses, set)
 
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Resource (MonadResource, ResourceT, liftResourceT)
+import Control.Monad.Trans.Resource (ResourceT, liftResourceT)
 import Control.Monad.Trans.AWS (AWSConstraint, HasEnv(..), Env, runResourceT, sinkBody)
 import Network.AWS.Data.Body (_streamBody)
 import Data.Conduit (ConduitT, runConduit, Void, (.|), transPipe)
@@ -91,7 +91,7 @@ inventoryRetrievalJob :: (GlacierConstraint r m) => (JobParameters -> JobParamet
 inventoryRetrievalJob settings = initiateJob $ settings $ jobParameters InventoryRetrieval
 
 selectJob :: (GlacierConstraint r m) => SelectParameters -> (JobParameters -> JobParameters) -> m InitiateJobResponse
-selectJob selectParameters settings = initiateJob $ jpSelectParameters ?~ selectParameters $ settings $ jobParameters Select
+selectJob selectParams settings = initiateJob $ jpSelectParameters ?~ selectParams $ settings $ jobParameters Select
 
 bulk, expedited, standard :: JobParameters -> JobParameters
 bulk = jpTier ?~ TBulk

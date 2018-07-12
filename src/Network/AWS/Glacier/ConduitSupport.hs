@@ -1,13 +1,12 @@
-{-# LANGUAGE BangPatterns, FlexibleContexts #-}
+{-# LANGUAGE BangPatterns #-}
 module ConduitSupport where
 
 import Data.ByteString (ByteString)
-import Data.Conduit (ConduitT, Void, runConduit, (.|), await, yield)
+import Data.Conduit (ConduitT, Void, (.|), await, yield)
 import Data.Conduit.Process (CreateProcess, ClosedStream(..), streamingProcess, waitForStreamingProcess)
 import Data.Conduit.Async (buffer)
 import System.Exit (ExitCode)
 
-import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Primitive (PrimMonad)
 
@@ -33,8 +32,8 @@ chunksOf size =
   .| C.map fromByteVector
 
 zipWithIndexFrom :: (Enum e, Monad m) => e -> ConduitT a (e, a) m ()
-zipWithIndexFrom i =
-    loop i
+zipWithIndexFrom e =
+    loop e
   where
     --loop !i = do
     --  mx <- await

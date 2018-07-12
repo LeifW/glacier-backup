@@ -1,10 +1,5 @@
-{-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module AmazonkaSupport (runReaderResource) where
-
-import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.AWS (AWST')
-import Control.Monad.Primitive (PrimMonad, PrimState, primitive)
 
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Resource (ResourceT, MonadUnliftIO, runResourceT)
@@ -22,14 +17,6 @@ import Util (lowerMaybe)
 
 runReaderResource :: MonadUnliftIO m => r -> ReaderT r (ResourceT m) a -> m a
 runReaderResource r m = runResourceT $ runReaderT m r
-
--- zomgwtfbbb is even happening
--- I just copied the ReaderT instance since AWST' is just a newtype wrapper for ReaderT
-{- 
-instance PrimMonad m => PrimMonad (AWST' r m) where
-  type PrimState (AWST' r m) = PrimState m
-  primitive = lift . primitive
--}
 
 shortText :: Builder -> Text
 shortText = LText.toStrict . Build.toLazyTextWith 32
