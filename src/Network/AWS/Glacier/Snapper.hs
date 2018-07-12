@@ -1,5 +1,8 @@
-{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, RecordWildCards, TupleSections  #-}
-module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
+{-# LANGUAGE OverloadedStrings, TypeApplications, FlexibleInstances, DeriveGeneric, DeriveDataTypeable, RecordWildCards, TupleSections, TemplateHaskell #-}
+module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, getSnapshot, setSnapshot, setUploadStatus, createSnapshot, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
+
+import Control.Lens.TH (makeLenses)
+import Control.Lens.Setter
 import DBus.Client --(Client, call, connectSession, connectSystem)
 import DBus
 import DBus.Generation (clientArgumentUnpackingError)
@@ -11,8 +14,10 @@ import Safe (lastMay)
 import Data.Maybe (fromMaybe, maybeToList)
 
 import Network.AWS.Data.Time (Time(..), ISO8601)
+import Network.AWS.Data.Text (toText, fromText)
 
-import Data.Text (Text, pack, unpack)
+import Data.Text (Text)
+import qualified Data.Text as T
 
 import Data.Word
 import Data.Int
@@ -50,8 +55,14 @@ listSnapshotsMethodCall = (methodCall
 getConfigMethodCall :: MethodCall
 getConfigMethodCall = listSnapshotsMethodCall { methodCallMember = "GetConfig" }
 
+getSnapshotMethodCall :: MethodCall
+getSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "GetSnapshot" }
+
 setSnapshotMethodCall :: MethodCall
 setSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "SetSnapshot" }
+
+createSnapshotMethodCall :: MethodCall
+createSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "CreateSingleSnapshot" }
 
 {-
 data SnapshotRef = SnapshotRef {
@@ -62,44 +73,51 @@ data SnapshotRef = SnapshotRef {
 type SnapshotRef = Word32
 
 data UploadStatus = UploadStatus {
-  uploadId :: Text,
-  deltaFrom :: Maybe SnapshotRef
+  _archiveId :: Text,
+  _deltaFrom :: Maybe SnapshotRef
 } deriving (Eq, Show, Generic, Data)
 
-uploadStatusToMap :: UploadStatus -> Map String String
-uploadStatusToMap (UploadStatus id delta) = Map.fromList $
-    ("uploadId", unpack id) :
-    maybeToList (("deltaFrom",) . show <$> delta)
+makeLenses 'UploadStatus
 
-uploadStatusFromMap :: Map String String -> Maybe UploadStatus 
+uploadStatusToMap :: UploadStatus -> Map Text Text
+uploadStatusToMap (UploadStatus id delta) = Map.fromList $
+    ("archiveId", T.take 7 id) : -- the Glacier archive IDs are super long and will make the snapper table view wrap. So truncate them.
+    maybeToList (("deltaFrom",) . toText <$> delta)
+
+uploadStatusFromMap :: Map Text Text -> Maybe UploadStatus 
 uploadStatusFromMap m = do
-  uploadId <- pack <$> Map.lookup "uploadId" m
-  Just $ UploadStatus uploadId (read <$> Map.lookup "deltaFrom" m)
+  archiveId <- Map.lookup "archiveId" m
+  Just $ UploadStatus archiveId (either (error . ("Can't parse number : " ++) ) id . fromText <$> Map.lookup "deltaFrom" m)
+
+data Cleanup = Number | Timeline | None | GlacierBackup deriving (Eq, Show, Generic, Data)
   
 data Snapshot = Snapshot {
-  snapshotNum :: SnapshotRef,
-  timestamp :: ISO8601,
+  _snapshotNum :: SnapshotRef,
+  _timestamp :: ISO8601,
   --timestamp :: UTCTime,
-  uploadedStatus :: Maybe UploadStatus,
-  cleanup :: Cleanup,
-  description :: Maybe String
+  _uploadedStatus :: Maybe UploadStatus,
+  _cleanup :: Cleanup,
+  _description :: Maybe Text
 } deriving (Eq, Show, Generic, Data)
 
-data Cleanup = Number | Timeline | None deriving (Eq, Show, Generic, Data)
+makeLenses 'Snapshot
 
-cleanupToString :: Cleanup -> String
+
+cleanupToString :: Cleanup -> Text
 cleanupToString Number = "number"
 cleanupToString Timeline = "timeline"
 cleanupToString None = ""
+cleanupToString GlacierBackup = "glacier"
 
-cleanupFromString :: String -> Cleanup
+cleanupFromString :: Text -> Cleanup
 cleanupFromString "number" = Number
 cleanupFromString "timeline" = Timeline
 cleanupFromString "" = None
+cleanupFromString "glacier" = GlacierBackup
 
 instance IsVariant Cleanup where
   toVariant = toVariant . cleanupToString
-  fromVariant v = cleanupFromString <$> fromVariant @String v
+  fromVariant v = cleanupFromString <$> fromVariant @Text v
 
 {-
 stringToMaybe :: String -> Maybe String
@@ -113,11 +131,15 @@ instance IsVariant (Maybe String) where
   toVariant = toVariant . lowerMaybe
   fromVariant v = raiseToMaybe <$> fromVariant v
 
+instance IsVariant (Maybe Text) where
+  toVariant = toVariant . lowerMaybe
+  fromVariant v = raiseToMaybe <$> fromVariant v
+
 timeFromTimestamp :: Integral a => a -> Time format
 timeFromTimestamp = Time . posixSecondsToUTCTime . fromIntegral 
 
 --snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
-snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, String, Map String String) -> Snapshot
+snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, Text, Text, Map Text Text) -> Snapshot
 snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot num (timeFromTimestamp timestamp) (uploadStatusFromMap userdata) (cleanupFromString cleanup) (raiseToMaybe description)
 -- TODO Replace the above Nothingwith uploadStatus, extractedfrom userdata
 --snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
@@ -160,6 +182,15 @@ throwIOEither = either throwIO pure
 listSnapshots :: String -> Client -> IO [Snapshot]
 listSnapshots config = doMethodCall listSnapshotsMethodCall [toVariant config]
 
+createSnapshot :: String -> Maybe String -> Client -> IO SnapshotRef
+createSnapshot config description = doMethodCall createSnapshotMethodCall [
+    toVariant config,
+    toVariant description,
+    toVariant GlacierBackup,
+    toVariant $ Map.empty @String @String
+  ]
+  
+
 --getConfig :: String -> Client -> IO (Either MethodError (String, String, Map String String))
 getConfig :: String -> Client -> IO SnapperConfig
 getConfig config = doMethodCall getConfigMethodCall [toVariant config]
@@ -167,17 +198,36 @@ getConfig config = doMethodCall getConfigMethodCall [toVariant config]
 --setSnapshot :: String -> Snapshot -> String -> Cleanup -> Map String String -> Client -> IO String
 --setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
 --
+
+
+getSnapshot :: String -> SnapshotRef -> Client -> IO Snapshot
+getSnapshot config snapshotId = doMethodCall getSnapshotMethodCall [
+    toVariant config,
+    toVariant snapshotId
+  ]
+
 setSnapshot :: String -> Snapshot -> Client -> IO ()
 setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [
     toVariant config,
-    toVariant snapshotNum,
-    toVariant description,
-    toVariant cleanup,
-    toVariant $ maybe Map.empty uploadStatusToMap uploadedStatus
+    toVariant _snapshotNum,
+    toVariant _description,
+    toVariant _cleanup,
+    toVariant $ maybe Map.empty uploadStatusToMap _uploadedStatus
   ]
 --setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [toVariant config, toVariant @Word32 (fromIntegral snapshotNum), toVariant description, toVariant cleanup, toVariant (Map.empty @String @String)]
 --setSnapshot config (Snapshot snapshotNum timestamp description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
 --setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant (50 :: Word32),  toVariant ("" :: String), toVariant userdata]
+
+setUploadStatus :: String -> SnapshotRef -> UploadStatus -> Client -> IO Snapshot
+setUploadStatus config snapshotId uploadStatus = updateSnapshot config snapshotId $ uploadedStatus ?~ uploadStatus
+--setUploadStatus config snapshotId uploadStatus = updateSnapshot config snapshotId $ \s -> s { _uploadedStatus = Just uploadStatus }
+
+updateSnapshot :: String -> SnapshotRef -> (Snapshot -> Snapshot) -> Client -> IO Snapshot
+updateSnapshot config snapshotId snapshotUpdate client = do
+  snapshot <- getSnapshot config snapshotId client
+  let updatedSnapshot = snapshotUpdate snapshot
+  setSnapshot config updatedSnapshot client
+  pure updatedSnapshot
 
 getSubvolumeFromConfig :: String -> Client -> IO FilePath
 getSubvolumeFromConfig config client = subvolume <$> getConfig config client

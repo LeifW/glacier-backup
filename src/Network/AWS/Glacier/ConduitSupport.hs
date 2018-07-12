@@ -1,8 +1,14 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, FlexibleContexts #-}
 module ConduitSupport where
 
 import Data.ByteString (ByteString)
-import Data.Conduit (ConduitT, (.|), await, yield)
+import Data.Conduit (ConduitT, Void, runConduit, (.|), await, yield)
+import Data.Conduit.Process (CreateProcess, ClosedStream(..), streamingProcess, waitForStreamingProcess)
+import Data.Conduit.Async (buffer)
+import System.Exit (ExitCode)
+
+import Control.Monad.IO.Class (MonadIO)
+import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Primitive (PrimMonad)
 
 import Data.Vector.Storable (Vector, unsafeToForeignPtr)
@@ -26,10 +32,9 @@ chunksOf size =
      C.vectorBuilder size C.mapM_E
   .| C.map fromByteVector
 
--- Generalize to Enum?
-zipWithIndex :: Monad m => ConduitT a (Int, a) m ()
-zipWithIndex =
-    loop 0
+zipWithIndexFrom :: (Enum e, Monad m) => e -> ConduitT a (e, a) m ()
+zipWithIndexFrom i =
+    loop i
   where
     --loop !i = do
     --  mx <- await
@@ -42,4 +47,15 @@ zipWithIndex =
                                                  yield (i, x)
                                                  loop (succ i)
                                         )
-                            
+
+bufferedSourceCommandWithConsumer :: MonadUnliftIO m
+  => CreateProcess
+  -> ConduitT ByteString a m ()
+  -> ConduitT a Void m r 
+  -> m (ExitCode, r)
+bufferedSourceCommandWithConsumer cmd sourceTransformer consumer = do
+  (ClosedStream, (source, close), ClosedStream, cph) <- streamingProcess cmd
+  res <- buffer 1 (source .| sourceTransformer) consumer
+  close
+  ec <- waitForStreamingProcess cph
+  return (ec, res)

@@ -11,7 +11,6 @@ import Snapper (SnapshotRef)
 
 data ArchiveSnapshotDescription = ArchiveSnapshotDescription {
   _current :: SnapshotRef,
-  _timestamp :: ISO8601,
   _previous :: Maybe SnapshotRef
 } deriving (Show, Data, Generic)
 
@@ -22,10 +21,10 @@ csvSep :: Text
 csvSep = singleton csvSepChar
 
 instance ToText ArchiveSnapshotDescription where
-  toText (ArchiveSnapshotDescription i ts prev) = intercalate csvSep [toText i, toText ts, toText prev]
+  toText (ArchiveSnapshotDescription i prev) = intercalate csvSep [toText i, toText prev]
 
 -- The parsers don't seem to compose - they each expect end of input.
 descriptionFromCsv :: Text -> Either String ArchiveSnapshotDescription
 descriptionFromCsv t = case splitOn csvSep t of
-  [i, ts, prev] -> ArchiveSnapshotDescription <$> fromText i <*> fromText ts <*> fromText  prev
-  other -> Left $ "Expected three comma-seperated values; got: " ++ show other
+  [i, ts, prev] -> ArchiveSnapshotDescription <$> fromText i <*> fromText  prev
+  other -> Left $ "Expected two comma-seperated values; got: " ++ show other

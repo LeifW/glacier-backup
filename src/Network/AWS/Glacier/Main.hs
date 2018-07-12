@@ -15,6 +15,7 @@ import GHC.Generics (Generic)
 import Data.Yaml --(FromJSON, toJSON)
 import Data.Yaml.Config (loadYamlSettings, useEnv)
 
+import Control.Monad.Reader (runReaderT)
 import Control.Monad.Trans.AWS --(AWSConstraint, Credentials(..))
 import Control.Monad (join, guard)
 import Control.Monad.Catch (throwM)
@@ -53,7 +54,7 @@ confDef :: Value
 confDef = object [
     ("snapper_config_name", "root"),
     ("aws_account_id",      "-"),
-    ("upload_part_size_MB", toJSON @Int 64)
+    ("upload_part_size_MB", toJSON @Int 32)
   ]
 
 {-
@@ -152,5 +153,5 @@ main' configFilePath = do
   --config <- decodeFileEither "glacier-backup.yml"
   (snapper_config_name, glacierEnv) <- setupConfig configFilePath
   --getDeltaRange snapper_config_name
-  runReaderResource glacierEnv $ uploadBackup snapper_config_name
+  runReaderT (uploadBackup snapper_config_name) glacierEnv 
   --threadDelay 10000000

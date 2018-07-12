@@ -25,9 +25,11 @@ runReaderResource r m = runResourceT $ runReaderT m r
 
 -- zomgwtfbbb is even happening
 -- I just copied the ReaderT instance since AWST' is just a newtype wrapper for ReaderT
+{- 
 instance PrimMonad m => PrimMonad (AWST' r m) where
   type PrimState (AWST' r m) = PrimState m
   primitive = lift . primitive
+-}
 
 shortText :: Builder -> Text
 shortText = LText.toStrict . Build.toLazyTextWith 32

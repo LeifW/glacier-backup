@@ -33,21 +33,17 @@ import Network.AWS (LogLevel(..))
 import LiftedGlacierRequests (UploadId, createVault)
 import GlacierRequests (UploadId(UploadId))
 import GlacierUploadFromProc
-import Snapper
+import Snapper (SnapshotRef, UploadStatus(UploadStatus), Snapshot(_timestamp),  runSystemDBus, createSnapshot, setUploadStatus, getSubvolumeFromConfig, nthSnapshotOnSubvolume)
 import SimpleDB (SnapshotUpload(..), getLatestUpload, insertSnapshotUpload, createDomain)
-import ArchiveSnapshotDescription
+import ArchiveSnapshotDescription(ArchiveSnapshotDescription(ArchiveSnapshotDescription))
 
 import qualified Data.Csv as Csv
 import Data.Map (Map, fromList) 
 
 btrfsSendCmd :: Maybe FilePath -> FilePath -> CmdSpec
---btrfsSendCmd parent snapshot = proc "cat" ["/home/leif/Music/audio.wav"]
---btrfsSendCmd parent snapshot = shell "btrfs send -q /home/.snapshots/123/snapshot"
 btrfsSendCmd parent snapshot = RawCommand "sudo" $ ["btrfs", "send", "-q"] ++ maybe [] (\p -> ["-p", p]) parent ++ [snapshot]
---btrfsSendCmd parent snapshot = RawCommand "btrfs" $ ["send", "-q"] ++ maybe [] (\p -> ["-p", p]) parent ++ [snapshot]
---btrfsSendCmd parent snapshot = proc "sudo" $ ["btrfs", "send"] ++ maybe [] (\p -> ["-p", p]) parent ++ [snapshot]
 
-btrfsSendToGlacier :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m, MonadUnliftIO m)
+btrfsSendToGlacier :: (GlacierConstraint r m, PrimMonad m)
                       => Maybe FilePath
                       -> FilePath
                       -> Maybe Text 
@@ -59,8 +55,6 @@ maybeWhen :: Applicative m => Bool -> m (Maybe a) -> m (Maybe a)
 maybeWhen True f = f
 maybeWhen False _ = pure Nothing
     
---runDBusWithSettings :: (HasGlacierSettings r, MonadReader r m => 
-
 -- Talk to Snapper (over DBus) and SimpleDB to figure out where we're at.
 -- Err, give the 
 -- SELECT (snapshotNum, date) FROM uploads SORT BY date LIMIT 1
@@ -69,9 +63,7 @@ maybeWhen False _ = pure Nothing
 -- Over n, make a new one.
 -- Is there more than 1 full upload, and if so, is the oldest one over 90 days old?
 
---shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m Bool
---shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m (Maybe ISO8601)
-shouldCreateNewFullBackup :: (AWSConstraint r m, HasGlacierSettings r) => m Bool
+shouldCreateNewFullBackup :: (GlacierConstraint r m) => m Bool
 shouldCreateNewFullBackup = do
   -- SELECT date FROM vaultName_uploads WHERE previous = NULL
   -- If none return None
@@ -79,7 +71,7 @@ shouldCreateNewFullBackup = do
     --   How many incremental uploads have been applied on top of the most recent one?
     --   Over n? Return None, to create a new one.
     --  Also while we're here: If more than one, check if the older one(s) are over 90 days old, and delete them.
-  pure True
+  pure False
   
 --This is only called if shouldcreate found a full upload, so there's at least one upload
 --getLastUpload :: (AWSConstraint r m, HasGlacierSettings r) =>  m (Maybe Snapshot)
@@ -89,22 +81,23 @@ shouldCreateNewFullBackup = do
 data E = E deriving (Typeable, Show)
 instance Exception E
 
-getDeltaRange :: (AWSConstraint r m, HasGlacierSettings r) => String -> m (Maybe SnapshotRef, Snapshot)
+getDeltaRange :: (GlacierConstraint r m) => String -> m (Maybe SnapshotRef, SnapshotRef)
 getDeltaRange snapperConfigName = do
   -- get snapper config: subvolume path
   -- is there an existing snapshot according to snapper?
   -- If not, throw an error, there's nothing we can do for now.
   -- Get the latest snapshot from snapper
-  --latestSnapshot from snapper
-  --let latestSnapshot = undefined :: (Int, UTCTime)
-  lastSnapshot <- maybe (throwM E) pure =<< runSystemDBus (getLastSnapshot snapperConfigName)
+  --lastSnapshot <- maybe (throwM E) pure =<< runSystemDBus (getLastSnapshot snapperConfigName)
+  currentSnapshot <-runSystemDBus $ createSnapshot snapperConfigName Nothing
   --lastSnapshot <- maybe (throwM E) pure =<< liftIO (getLastSnapshot snapperConfig)
   doFullBackup <- shouldCreateNewFullBackup
   -- Technically the join isn't needed - we know getLastUpload will have at least one item if there's already a full backup uploaded.
   -- Could also use >>= of MaybeT
   --previousSnapshot <- join <$> traverse (const getLatestUpload) doFullBackup
   previousSnapshot <- if doFullBackup then pure Nothing else getLatestUpload 
-  let previousSnapshot = Just 135
+  --let previousSnapshot = Just 144
+  --let previousSnapshot = Just 200
+  --let previousSnapshot = Just 135
   --previousSnapshot <- sequence $ doFullBackup >>= (const getLastUpload)
   --previousSnapshot <- if doFullBackup then pure Nothing else Just getLatestUpload
   --fullBackup <- createNewFullBackup
@@ -112,11 +105,11 @@ getDeltaRange snapperConfigName = do
   --pure (previousSnapshot, lastSnapshot)
   -- get the paths to those snapshots
   --pure undefined 
-  pure (previousSnapshot, lastSnapshot)
+  pure (previousSnapshot, currentSnapshot)
 
-provisionAWS :: (AWSConstraint r m, HasGlacierSettings r) => m ()
+provisionAWS :: (GlacierConstraint r m) => m ()
 provisionAWS = do
-  --createVault
+  createVault
   createDomain
 
 {-
@@ -130,20 +123,20 @@ data ArchiveDescription = ArchiveDescription {
 --instance FromText ArchiveDescription where
 --  toText b = stripEnd $ toText $ toBS $ Csv.encode [b]
 
-uploadBackup :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m, MonadUnliftIO m) => String -> m ()
+uploadBackup :: (GlacierConstraint r m, PrimMonad m)  => String -> m ()
 uploadBackup snapperConfigName = do
-  (previousNum, current) <- getDeltaRange snapperConfigName
-  let currentNum = snapshotNum current
+  (previous, current) <- getDeltaRange snapperConfigName
+  --let currentNum = _snapshotNum current
   subvolume <- runSystemDBus (getSubvolumeFromConfig snapperConfigName)
   let nthSnapshot = nthSnapshotOnSubvolume subvolume
-  let snapshotDescription = ArchiveSnapshotDescription currentNum (timestamp current) previousNum
+  let snapshotDescription = ArchiveSnapshotDescription current previous
   {-
   conn <- liftIO $ open "test.db"
   liftIO $ execute_ conn "CREATE TABLE IF NOT EXISTS uploads (previous TEXT, current TEXT NOT NULL, uploadId TEXT NOT NULL)"
   liftIO $ execute conn "INSERT INTO uploads (previous, current, uploadId) VALUES (?,?,?)" (nthSnapshot <$> previousNum, nthSnapshot currentNum, UploadId "foo")
   liftIO $ close conn
   -}
-  glacierUpload <- btrfsSendToGlacier (nthSnapshot <$> previousNum) (nthSnapshot currentNum) (Just $ toText snapshotDescription) Nothing
-  -- SDB auth is broken:
-  --insertSnapshotUpload $ SnapshotUpload glacierUpload snapshotDescription
-  pure ()
+  glacierUpload <- btrfsSendToGlacier (nthSnapshot <$> previous) (nthSnapshot current) (Just $ toText snapshotDescription) Nothing
+  let uploadStatus = UploadStatus (_archiveId glacierUpload) previous
+  timestamp <- _timestamp <$> runSystemDBus (setUploadStatus snapperConfigName current uploadStatus)
+  insertSnapshotUpload $ SnapshotUpload glacierUpload snapshotDescription timestamp

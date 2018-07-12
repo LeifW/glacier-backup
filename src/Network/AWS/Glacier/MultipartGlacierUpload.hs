@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable, DeriveGeneric, OverloadedStrings, BangPatterns #-}
-module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), _vaultName, PartSize(getNumBytes), UploadId(getAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload) where
+module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), GlacierConstraint, _vaultName, PartSize(getNumBytes), UploadId(getAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload, zipChunkAndIndex) where
 
 import Data.Data (Data(..), mkNoRepType, Typeable)
 import GHC.Generics (Generic)
@@ -10,13 +10,14 @@ import Control.Monad.Reader
 
 import Data.Conduit (ConduitT, (.|), Void)
 import qualified Data.Conduit.Combinators as C
-import Data.Conduit.Zlib -- (gzip)
+import Data.Conduit.Zlib (gzip)
 
 import Data.Text (Text)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 
 import Control.Lens (view)
+import Data.Bifunctor (bimap)
 
 import Control.Monad (when)
 import Control.Monad.IO.Class
@@ -27,7 +28,7 @@ import Control.Monad.Trans.Class (lift)
 import Network.AWS.Data.Crypto
 
 import TreeHash (treeHashByChunksOf,treeHashList)
-import ConduitSupport (chunksOf, zipWithIndex)
+import ConduitSupport (chunksOf, zipWithIndexFrom)
 import LiftedGlacierRequests
 
 import Control.Monad.IO.Unlift
@@ -52,26 +53,26 @@ data GlacierUpload = GlacierUpload {
   _size :: !NumBytes
 } deriving (Show, Data, Generic)
   
-upload :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m, MonadUnliftIO m) -- PrimMonad constraint is for vectorBuilder 
+upload :: (GlacierConstraint r m, PrimMonad m) -- PrimMonad constraint is for vectorBuilder 
        => Maybe Text 
        -> ConduitT ByteString Void m GlacierUpload
 upload archiveDescription = do
   uploadId <- lift $ initiateMultipartUpload archiveDescription
-  (totalArchiveSize, treeHashChecksum) <- uploadByChunks uploadId 0
+  (totalArchiveSize, treeHashChecksum) <- zipChunkAndIndex .| uploadByChunks uploadId 0
   archiveId <- lift $ completeMultipartUpload uploadId totalArchiveSize treeHashChecksum 
   pure $ GlacierUpload archiveId treeHashChecksum totalArchiveSize
 
-uploadByChunks :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m, MonadUnliftIO m) => UploadId -> Int -> ConduitT ByteString Void m (NumBytes, Digest SHA256)
+uploadByChunks :: (GlacierConstraint r m, PrimMonad m) => UploadId -> Int -> ConduitT (Int, ByteString) Void m (NumBytes, Digest SHA256)
 uploadByChunks uploadId resumeFrom = do
-  partSize <- _partSize <$> view glacierSettingsL
-  liftIO $ print partSize
-  --l <- C.sinkList
-  --liftIO $ print l
-  (!sizes,  !checksums) <- unzip <$> pipeline partSize uploadId resumeFrom
+  --aggregateSizesAndChecksums <$> pipeline partSize uploadId resumeFrom
+  (sizes, checksums) <- unzip <$> glacierUploadParts uploadId resumeFrom
   pure (sum sizes, treeHashList checksums)
-  --pure (50, hash ("foo" :: ByteString))
-  --pure undefined
+  --aggregateSizesAndChecksums <$> (zipChunkAndIndex .| glacierUploadParts uploadId resumeFrom)
   
+aggregateSizesAndChecksums :: [(NumBytes, Digest SHA256)] -> (NumBytes, Digest SHA256)
+aggregateSizesAndChecksums = bimap sum treeHashList . unzip 
+--aggregateSizesAndChecksums = (\(sizes, checksums) ->  (sum sizes, treeHashList checksums)) . unzip 
+
 range :: Int -> PartSize -> Int -> (NumBytes, NumBytes)
 range !index !partSize !size =
   let startOffset = fromIntegral index * fromIntegral (getNumBytes partSize)
@@ -79,29 +80,43 @@ range !index !partSize !size =
   in
      (startOffset, endOffset)
 
-pipeline :: (AWSConstraint r m, HasGlacierSettings r, PrimMonad m, MonadUnliftIO m) => PartSize -> UploadId -> Int -> ConduitT ByteString Void m [(NumBytes, Digest SHA256)]
-pipeline partSize uploadId resumeFrom = 
-     gzip
-  .| chunksOf (getNumBytes partSize)
-  .| zipWithIndex
-  .| (C.drop resumeFrom *> C.mapM uploadChunk)
+zipChunkAndIndex :: (GlacierConstraint r m, PrimMonad m) => ConduitT ByteString (Int, ByteString) m ()
+zipChunkAndIndex = do
+  partSize <- getNumBytes . _partSize <$> view glacierSettingsL
+  gzip
+    .| chunksOf partSize
+    .| zipWithIndexFrom 0
+  
+glacierUploadParts :: (GlacierConstraint r m, PrimMonad m) => UploadId -> Int -> ConduitT (Int, ByteString) Void m [(NumBytes, Digest SHA256)]
+glacierUploadParts uploadId resumeFrom =
+    (C.drop resumeFrom
+       *> C.mapM (uploadPart uploadId))
   .| C.sinkList
-    where uploadChunk :: (AWSConstraint r m, HasGlacierSettings r, MonadUnliftIO m) => (Int,  ByteString) -> m (NumBytes, Digest SHA256)
-          uploadChunk (!sequenceNum, !chunk) = do
-            let !size = BS.length chunk
-            liftIO $ putStr "size: "
-            liftIO $ print size
-            let !byteRange = range sequenceNum partSize size
-            liftIO $ print byteRange
-            let !checksum = treeHash chunk
-            liftIO $ putStrLn $ "About to upload part: " <> show sequenceNum
-            liftIO $ print checksum
-            --liftIO $ BS.appendFile "/tmp/out" chunk
-            glacierSettings <- view glacierSettingsL
-            env <- view environment
-            --liftIO $ runResourceT $ runReaderT  (uploadMultipartPart uploadId byteRange checksum chunk) (GlacierEnv env glacierSettings)
-            runResourceT $ uploadMultipartPart uploadId byteRange checksum chunk
-            --force <$> uploadMultipartPart uploadId byteRange checksum chunk
-            
-            --unless reponse checksum = sent checksum error "why?
-            pure (fromIntegral size, checksum) 
+
+uploadPart :: (GlacierConstraint r m) => UploadId -> (Int,  ByteString) -> m (NumBytes, Digest SHA256)
+uploadPart uploadId (!sequenceNum, !chunk) = do
+  partSize <- _partSize <$> view glacierSettingsL
+  let !size = BS.length chunk
+  liftIO $ putStr "size: "
+  liftIO $ print size
+  let !byteRange = range sequenceNum partSize size
+  liftIO $ print byteRange
+  let !checksum = treeHash chunk
+  liftIO $ putStrLn $ "About to upload part: " <> show sequenceNum
+  liftIO $ print checksum
+  --liftIO $ BS.appendFile "/tmp/out" chunk
+  glacierSettings <- view glacierSettingsL
+  env <- view environment
+  --liftIO $ runResourceT $ runReaderT  (uploadMultipartPart uploadId byteRange checksum chunk) (GlacierEnv env glacierSettings)
+  uploadMultipartPart uploadId byteRange checksum chunk
+  --force <$> uploadMultipartPart uploadId byteRange checksum chunk
+  
+  --unless reponse checksum = sent checksum error "why?
+  pure (fromIntegral size, checksum) 
+  
+pipeline :: (GlacierConstraint r m, PrimMonad m) => PartSize -> UploadId -> Int -> ConduitT ByteString Void m [(NumBytes, Digest SHA256)]
+pipeline partSize uploadId resumeFrom = 
+     chunksOf (getNumBytes partSize)
+  .| zipWithIndexFrom 0
+  .| (C.drop resumeFrom *> C.mapM (uploadPart uploadId))
+  .| C.sinkList
