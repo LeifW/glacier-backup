@@ -2,6 +2,7 @@
 module SimpleDB (SnapshotUpload(..), getLatestUpload, listUploads, insertSnapshotUpload, createDomain, listDom, select, runSdbInAmazonka) where
 
 import Safe (headMay)
+import Data.List (sortOn)
 
 import Unsafe.Coerce (unsafeCoerce)
 
@@ -28,7 +29,7 @@ import Control.Monad (void, (>=>), (<=<))
 import Control.Monad.Catch (MonadThrow, Exception, throwM)
 import Data.Bifunctor
 
-import Data.Text (Text)
+import Data.Text (Text, pack, unpack)
 import Data.ByteString (ByteString)
 import "cryptonite" Crypto.Hash (Digest, HashAlgorithm, digestFromByteString)
 import Data.ByteArray.Encoding (Base(Base16), convertFromBase)
@@ -36,7 +37,10 @@ import Data.Text.Encoding (encodeUtf8, encodeUtf8Builder)
 
 import GHC.Generics (Generic)
 
-import MultipartGlacierUpload (GlacierConstraint, GlacierUpload(..),  HasGlacierSettings(..), _vaultName)
+import Formatting
+--import Text.Layout.Table
+
+import MultipartGlacierUpload (NumBytes, GlacierConstraint, GlacierUpload(..),  HasGlacierSettings(..), _vaultName)
 import Snapper (SnapshotRef)
 import ArchiveSnapshotDescription
 
@@ -52,6 +56,17 @@ data SnapshotUpload = SnapshotUpload {
   _timestamp :: ISO8601
 } deriving (Show, Generic)
 
+data DbColumnHeader = PreviousSnapshot | TimeStamp | Size | ArchiveId | TreeHashChecksum deriving (Show, Read, Eq, Ord, Enum, Bounded)
+
+instance ToText DbColumnHeader where toText = pack . show
+
+columnHeaders :: [String]
+columnHeaders = "SnapshotId" : map @DbColumnHeader show [minBound..maxBound]
+--columnHeaders = "SnapshotId" : map show ( [minBound..maxBound] :: [DbColumnHeader] )
+
+attr :: ToText v => DbColumnHeader -> v -> Attribute SetAttribute
+attr k v = replaceAttribute (pack $ show k) (toText v)
+
 formatISOTime :: UTCTime -> Text
 formatISOTime time = toText (Time time :: ISO8601)
 
@@ -59,12 +74,14 @@ fromISOTime :: Text -> Either String UTCTime
 fromISOTime t = fromTime <$> fromText @ISO8601 t
 
 glacierUploadToItem :: Text -> SnapshotUpload -> PutAttributes
-glacierUploadToItem domainName (SnapshotUpload glacierUpload snapshotInfo timestamp) = putAttributes (toText currentSnapshotNum) ([
-    replaceAttribute "archiveId" archiveId,
-    replaceAttribute "size" (toText size),
-    replaceAttribute "treeHashChecksum" (toText treeHashChecksum),
-    replaceAttribute "timestamp" (toText timestamp)
-  ] ++ (replaceAttribute "previousSnapshot" . toText <$> maybeToList previousSnapshotNum)
+glacierUploadToItem domainName (SnapshotUpload glacierUpload snapshotInfo timestamp) = putAttributes (toText currentSnapshotNum) (
+  (attr PreviousSnapshot <$> maybeToList previousSnapshotNum) ++ 
+  [
+    attr TimeStamp timestamp,
+    attr Size size,
+    attr ArchiveId archiveId,
+    attr TreeHashChecksum treeHashChecksum
+  ] 
   ) domainName
   where
     GlacierUpload archiveId treeHashChecksum size = glacierUpload
@@ -157,9 +174,26 @@ instance Exception SimpleDBParseException
 listUploads :: (GlacierConstraint r m) => m ()
 listUploads = do
   vaultName <- _vaultName <$> view glacierSettingsL  
-  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName <> " WHERE timestamp IS NOT NULL ORDER BY timestamp"
+  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName
+  --SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp
   mapM_ (liftIO . print) items
-  pure ()
+  --mapM_ (liftIO . print . itemToRow) items
+
+--The string stuff is only for displaying the table layout for the "uploads" command cause the table layout library uses strings.
+--Also read and show can be derived, but use String.
+
+itemToRow :: Item [Attribute Text] -> [String]
+itemToRow (Item name attributes) = unpack name : (map formatAttribute . sortOn fst . map nameAttribute) attributes
+--itemToRow (Item name attributes) = unpack name : map (unpack . attributeData) attributes
+--map formatAttribute . sortOn fst . map read
+
+nameAttribute :: Attribute Text -> (DbColumnHeader, String)
+nameAttribute (ForAttribute name value) = (read $ unpack name, unpack value)
+
+formatAttribute :: (DbColumnHeader, String) -> String
+formatAttribute (Size, v) = formatToString (bytes @Double (fixed 2 % " ")) (read @NumBytes v) 
+formatAttribute (_, v) = v
+
 
 getLatestUpload :: (GlacierConstraint r m) => m (Maybe SnapshotRef)
 getLatestUpload = do
