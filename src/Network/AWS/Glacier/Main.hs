@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, StandaloneDeriving, DeriveGeneric, DeriveAnyClass, RecordWildCards #-}
 module Main where
 
 import System.IO (stdout)
@@ -7,32 +7,37 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 
 import Options.Applicative
-import Data.Yaml (Value(..), FromJSON, object, (.=))
+import Data.Yaml (Value(..), ToJSON, FromJSON, object, (.=))
 import Data.Yaml.Config (loadYamlSettings, useEnv)
 
 import Control.Monad.Reader (runReaderT)
-import Control.Monad.Trans.AWS (Region, Credentials(Discover), LogLevel(Debug), envLogger, envRegion, newEnv, newLogger)
+import Control.Monad.Trans.AWS (Region, Credentials(Discover), LogLevel(..), envLogger, envRegion, newEnv, newLogger)
 import Control.Lens.Setter (set)
 
 import LiftedGlacierRequests (GlacierEnv(..), GlacierSettings(..))
 import AllowedPartSizes (PartSize)
 import UploadSnapshot
 
+deriving instance Generic LogLevel
+instance FromJSON LogLevel
+instance ToJSON LogLevel
 
 data Config = Config {
   snapper_config_name :: String, -- Defaults to "root"
   region :: Region,
   glacier_vault_name :: Text,
   upload_part_size_MB :: PartSize,
-  aws_account_id :: Text -- A 12-digit number, defaults to account of credentials. (-)
+  aws_account_id :: Text, -- A 12-digit number, defaults to account of credentials. (-)
   --aws_account_id :: Maybe Int64 -- A 12-digit number, defaults to account of credentials. (-)
+  log_level :: LogLevel
 } deriving (Show, Generic, FromJSON)
 
 configDefaults :: Value
 configDefaults = object [
     "snapper_config_name" .= String "root",
     "aws_account_id"      .= String "-",
-    "upload_part_size_MB" .= Number 32
+    "upload_part_size_MB" .= Number 32,
+    "log_level"           .= String "Info"
   ]
 
 data Command = Provision | ListUploads
@@ -62,7 +67,7 @@ setupConfig :: FilePath -> IO (String, GlacierEnv)
 setupConfig configFilePath = do
   Config{..} <- loadYamlSettings [configFilePath] [configDefaults] useEnv
   let glacierConfig = GlacierSettings aws_account_id glacier_vault_name upload_part_size_MB 
-  lgr <- newLogger Debug stdout
+  lgr <- newLogger log_level stdout
   awsEnv <- set envRegion region . set envLogger lgr <$> newEnv Discover
   pure (snapper_config_name, GlacierEnv awsEnv glacierConfig)
 
