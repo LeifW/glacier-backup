@@ -1,5 +1,5 @@
 {-# LANGUAGE TemplateHaskell, BangPatterns, ConstraintKinds #-}
-module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize, getNumBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, createVault, deleteArchive, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, bulk, expedited, standard, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
+module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, createVault, deleteArchive, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, bulk, expedited, standard, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
 
 import Data.ByteString (ByteString)
 import Control.Lens --(Lens', view, makeLenses, set)
@@ -15,7 +15,7 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Catch
 
-import GlacierRequests (InitiateJobResponse, GetJobOutputResponse, PartSize, getNumBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, JobId, Digest, SHA256, ToHashedBody, bulk, expedited, standard)
+import GlacierRequests (InitiateJobResponse, GetJobOutputResponse, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, JobId, Digest, SHA256, ToHashedBody, bulk, expedited, standard)
 import qualified GlacierRequests
 
 import Network.AWS.Glacier.Types

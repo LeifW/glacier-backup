@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings, GeneralizedNewtypeDeriving, BangPatterns, ConstraintKinds #-}
 --module GlacierRequests (NumBytes, PartSize(getNumBytes), UploadId(getAsText), createVault, initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart, Digest, SHA256, ToHashedBody) where
-module GlacierRequests (NumBytes, PartSize, getNumBytes, UploadId(..), JobId(..), ArchiveId, InitiateJobResponse, GetJobOutputResponse, JobParameters, createVault, deleteArchive, archiveRetrievalJob, inventoryRetrievalJob, selectJob, getJobOutput, initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart, Digest, SHA256, ToHashedBody, MonadUnliftIO, MonadCatch, MonadReader, HasEnv, bulk, expedited, standard) where
+module GlacierRequests (NumBytes, PartSize, partSizeInBytes, UploadId(..), JobId(..), ArchiveId, InitiateJobResponse, GetJobOutputResponse, JobParameters, createVault, deleteArchive, archiveRetrievalJob, inventoryRetrievalJob, selectJob, getJobOutput, initiateMultipartUpload, completeMultipartUpload, uploadMultipartPart, Digest, SHA256, ToHashedBody, MonadUnliftIO, MonadCatch, MonadReader, HasEnv, bulk, expedited, standard) where
 
 import Control.Monad.IO.Class
 import Data.Word (Word64)
@@ -27,7 +27,7 @@ import Formatting
 
 import AmazonkaSupport ()
 
-import AllowedPartSizes (PartSize, getNumBytes)
+import AllowedPartSizes (PartSize, partSizeInBytes)
 
 type NumBytes = Word64
 
@@ -90,7 +90,7 @@ initiateMultipartUpload :: (AWSMonads r m)
        -> PartSize
        -> m UploadId
 initiateMultipartUpload accountId vaultName archiveDescription partSize = do
-  resp <- runResourceT $ send $ set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText $ getNumBytes partSize)
+  resp <- runResourceT $ send $ set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText $ partSizeInBytes partSize)
   pure $ UploadId $ resp ^. imursUploadId
 
 completeMultipartUpload :: (AWSMonads r m)

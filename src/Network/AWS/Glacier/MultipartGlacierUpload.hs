@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric, BangPatterns #-}
-module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), GlacierConstraint, _vaultName, PartSize, getNumBytes, UploadId(uploadIdAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload, zipChunkAndIndex) where
+module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), GlacierConstraint, _vaultName, PartSize, partSizeInBytes, UploadId(uploadIdAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload, zipChunkAndIndex) where
 
 import GHC.Generics (Generic)
 
@@ -49,14 +49,14 @@ uploadByChunks uploadId resumeFrom = do
   
 range :: Int -> PartSize -> Int -> (NumBytes, NumBytes)
 range !index !partSize !size =
-  let startOffset = fromIntegral index * fromIntegral (getNumBytes partSize)
+  let startOffset = fromIntegral index * fromIntegral (partSizeInBytes partSize)
       endOffset = startOffset + fromIntegral size - 1 -- math is hard? I guess the end range is non-inclusive.
   in
      (startOffset, endOffset)
 
 zipChunkAndIndex :: (GlacierConstraint r m, PrimMonad m) => ConduitT ByteString (Int, ByteString) m ()
 zipChunkAndIndex = do
-  partSize <- getNumBytes . _partSize <$> view glacierSettingsL
+  partSize <- partSizeInBytes . _partSize <$> view glacierSettingsL
   gzip
     .| chunksOf partSize
     .| zipWithIndexFrom 0

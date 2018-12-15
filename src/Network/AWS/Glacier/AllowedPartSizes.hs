@@ -1,4 +1,4 @@
-module AllowedPartSizes (PartSize, getNumBytes)  where
+module AllowedPartSizes (PartSize, partSizeInBytes)  where
 
 import Control.Monad.Fail (MonadFail)
 import Data.Aeson.Types (FromJSON(..), ToJSON(..))
@@ -16,8 +16,8 @@ newtype PartSize = PartSize Int deriving (Show)
 -- which seems like a far-fetched scenario for a number of reasons (2GB upload chunk in a 4GB address space?)
 
 -- Convert to number of bytes
-getNumBytes :: PartSize -> Int
-getNumBytes (PartSize i) = i * 1024 * 1024
+partSizeInBytes :: PartSize -> Int
+partSizeInBytes (PartSize i) = i * 1024 * 1024
 
 validPartSize :: MonadFail m => Int -> m PartSize
 validPartSize i = if i `elem` allowedPartSizes
@@ -30,8 +30,8 @@ instance ToJSON PartSize where
 instance FromJSON PartSize where
   parseJSON v = parseJSON v >>= validPartSize
 
-instance ToText PartSize where
-  toText (PartSize i) = toText i
+--instance ToText PartSize where
+--  toText (PartSize i) = toText i
 
-instance FromText PartSize where
-  parser = parser >>= validPartSize
+--instance FromText PartSize where
+--  parser = parser >>= validPartSize
