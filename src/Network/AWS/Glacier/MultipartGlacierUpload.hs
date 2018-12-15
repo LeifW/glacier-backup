@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveGeneric, BangPatterns #-}
-module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), GlacierConstraint, _vaultName, PartSize(getNumBytes), UploadId(getAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload, zipChunkAndIndex) where
+module MultipartGlacierUpload (GlacierUpload(..), HasGlacierSettings(..), GlacierConstraint, _vaultName, PartSize, getNumBytes, UploadId(uploadIdAsText), NumBytes, upload, uploadByChunks, initiateMultipartUpload, completeMultipartUpload, zipChunkAndIndex) where
 
 import GHC.Generics (Generic)
 
@@ -20,7 +20,7 @@ import Control.Monad.Trans.Class (lift)
 
 import Network.AWS.Data.Crypto
 
-import TreeHash (treeHashByChunksOf,treeHashList)
+import TreeHash (treeHashByChunksOf, treeHashList)
 import ConduitSupport (chunksOf, zipWithIndexFrom)
 import LiftedGlacierRequests
 
@@ -28,7 +28,7 @@ treeHash :: ByteString -> Digest SHA256
 treeHash = treeHashByChunksOf (1024 * 1024) -- 1 MB chunks == 1024k where 1k = 1024 bytes
 
 data GlacierUpload = GlacierUpload {
-  _archiveId :: !Text,
+  _archiveId :: !ArchiveId,
   _treeHashChecksum :: !(Digest SHA256),
   _size :: !NumBytes
 } deriving (Show, Generic)

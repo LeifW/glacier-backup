@@ -15,12 +15,11 @@ import Util (justWhen)
 byteStringChunksOf :: Int -> ByteString -> [ByteString]
 byteStringChunksOf !i = unfoldr (justWhen (not . BS.null) (BS.splitAt i))
 
-
 treeHashByChunksOf :: HashAlgorithm a => Int -> ByteString -> Digest a
 treeHashByChunksOf !chunkSize = treeHashList . map hash . byteStringChunksOf chunkSize
 
 treeHashList :: HashAlgorithm a => [Digest a] -> Digest a
 treeHashList = foldTree id hashPair . fromList
 
-hashPair :: (ByteArrayAccess ba, HashAlgorithm a) => ba -> ba  -> Digest a
+hashPair :: (ByteArrayAccess ba, HashAlgorithm a) => ba -> ba -> Digest a
 hashPair !a !b = hashFinalize $ hashUpdates hashInit [a, b]

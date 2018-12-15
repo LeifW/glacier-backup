@@ -1,17 +1,20 @@
-module UploadSnapshot (provisionAWS, listUploads, uploadBackup) where
+module UploadSnapshot (SnapshotRef, provisionAWS, uploadBackup, deleteUpload) where
 
 import Control.Exception
 import Type.Reflection (Typeable)
 import Data.Text (Text)
+import qualified Data.Text as T
 
 import Network.AWS.Data.Text
 
+import Data.Foldable (traverse_)
+import Control.Monad (void)
 import Control.Monad.Primitive (PrimMonad)
 import System.Process (CmdSpec(RawCommand))
-import LiftedGlacierRequests (UploadId, createVault)
+import LiftedGlacierRequests (UploadId, createVault, deleteArchive)
 import GlacierUploadFromProc
-import Snapper (SnapshotRef, UploadStatus(UploadStatus), Snapshot(_timestamp),  runSystemDBus, createSnapshot, setUploadStatus, getSubvolumeFromConfig, nthSnapshotOnSubvolume)
-import SimpleDB (SnapshotUpload(SnapshotUpload), getLatestUpload, insertSnapshotUpload, createDomain, listUploads)
+import Snapper (SnapshotRef, UploadStatus(UploadStatus), Snapshot(_timestamp),  runSystemDBus, createSnapshot, setUploadStatus, getSubvolumeFromConfig, nthSnapshotOnSubvolume, setCleanupToTimeline)
+import SimpleDB (SnapshotUpload(SnapshotUpload, _glacierUploadResult), getLatestUpload, insertSnapshotUpload, createDomain, deleteRow, getSnapshot)
 import ArchiveSnapshotDescription(ArchiveSnapshotDescription(ArchiveSnapshotDescription))
 
 
@@ -59,7 +62,7 @@ getDeltaRange snapperConfigName = do
   -- If not, throw an error, there's nothing we can do for now.
   -- Get the latest snapshot from snapper
   --lastSnapshot <- maybe (throwM E) pure =<< runSystemDBus (getLastSnapshot snapperConfigName)
-  currentSnapshot <-runSystemDBus $ createSnapshot snapperConfigName Nothing
+  currentSnapshot <- runSystemDBus $ createSnapshot snapperConfigName Nothing
   --lastSnapshot <- maybe (throwM E) pure =<< liftIO (getLastSnapshot snapperConfig)
   doFullBackup <- shouldCreateNewFullBackup
   -- Technically the join isn't needed - we know getLastUpload will have at least one item if there's already a full backup uploaded.
@@ -83,6 +86,14 @@ provisionAWS = do
   createVault
   createDomain
 
+deleteUpload :: GlacierConstraint r m => String -> SnapshotRef -> m ()
+deleteUpload snapperConfigName snapId = do
+  archiveId <- _archiveId . _glacierUploadResult <$> getSnapshot snapId
+  deleteArchive archiveId
+  -- also clear info from the snapper snapshot if it still exists
+  deleteRow snapId
+  void $ runSystemDBus $ setUploadStatus snapperConfigName snapId Nothing
+
 uploadBackup :: (GlacierConstraint r m, PrimMonad m)  => String -> m ()
 uploadBackup snapperConfigName = do
   (previous, current) <- getDeltaRange snapperConfigName
@@ -97,6 +108,8 @@ uploadBackup snapperConfigName = do
   liftIO $ close conn
   -}
   glacierUpload <- btrfsSendToGlacier (nthSnapshot <$> previous) (nthSnapshot current) (Just $ toText snapshotDescription) Nothing
-  let uploadStatus = UploadStatus (_archiveId glacierUpload) previous
-  timestamp <- _timestamp <$> runSystemDBus (setUploadStatus snapperConfigName current uploadStatus)
+  -- the Glacier archive IDs are super long and will make the snapper table view wrap. So truncate them:
+  let uploadStatus = UploadStatus (T.take 7 $ toText $ _archiveId glacierUpload) previous
+  timestamp <- _timestamp <$> runSystemDBus (setUploadStatus snapperConfigName current (Just uploadStatus))
   insertSnapshotUpload $ SnapshotUpload glacierUpload snapshotDescription timestamp
+  traverse_ (runSystemDBus . setCleanupToTimeline snapperConfigName) previous

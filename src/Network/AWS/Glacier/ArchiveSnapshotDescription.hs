@@ -7,8 +7,8 @@ import Network.AWS.Data.Text (ToText(toText), fromText)
 import Snapper (SnapshotRef)
 
 data ArchiveSnapshotDescription = ArchiveSnapshotDescription {
-  _current :: SnapshotRef,
-  _previous :: Maybe SnapshotRef
+  _current :: !SnapshotRef,
+  _previous :: !(Maybe SnapshotRef)
 } deriving (Show, Generic)
 
 csvSepChar :: Char

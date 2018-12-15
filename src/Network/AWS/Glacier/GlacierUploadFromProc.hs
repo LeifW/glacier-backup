@@ -2,7 +2,7 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module GlacierUploadFromProc(GlacierConstraint, HasGlacierSettings, NumBytes, GlacierUpload(..), _vaultName, glacierUploadFromProcess)  where
 
-import MultipartGlacierUpload(HasGlacierSettings, GlacierConstraint, NumBytes, UploadId(getAsText), GlacierUpload(..), _vaultName, zipChunkAndIndex, uploadByChunks, initiateMultipartUpload, completeMultipartUpload) 
+import MultipartGlacierUpload(HasGlacierSettings, GlacierConstraint, NumBytes, UploadId(uploadIdAsText), GlacierUpload(..), _vaultName, zipChunkAndIndex, uploadByChunks, initiateMultipartUpload, completeMultipartUpload) 
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
 import qualified Data.Text.Lazy as Lazy
@@ -71,7 +71,7 @@ glacierUploadFromProcess cmd archiveDescription resumptionPoint = do
     Just (i, upId) -> pure (i, upId)
     Nothing -> (0,) <$> initiateMultipartUpload archiveDescription
   --let resumeFrom = 0
-  logger Info $ format ("Uploading " % shown % " w/ uploadId " % stext) cmd (getAsText uploadId)
+  logger Info $ format ("Uploading " % shown % " w/ uploadId " % stext) cmd (uploadIdAsText uploadId)
   --(exitCode, (totalArchiveSize, treeHashChecksum))  <- sourceProcessWithConsumer (proc "cat" ["/home/leif/Downloads/The-Data-Engineers-Guide-to-Apache-Spark.pdf"])$ uploadByChunks uploadId
   --exitCode, bytes) <- sourceProcessWithConsumer createProcess C.fold
   (exitCode, (!totalArchiveSize, !treeHashChecksum)) <- bufferedSourceCommandWithConsumer (cmdSpecToCreateProcess cmd) zipChunkAndIndex $ uploadByChunks uploadId resumeFrom

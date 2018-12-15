@@ -7,16 +7,20 @@ import Data.Text (Text)
 import GHC.Generics (Generic)
 
 import Options.Applicative
+import Options.Applicative.Types (readerAsk)
 import Data.Yaml (Value(..), ToJSON, FromJSON, object, (.=))
 import Data.Yaml.Config (loadYamlSettings, useEnv)
 
 import Control.Monad.Reader (runReaderT)
+import Network.AWS.Data.Text (FromText)
+import qualified Network.AWS.Data.Text as AWSText
 import Control.Monad.Trans.AWS (Region, Credentials(Discover), LogLevel(..), envLogger, envRegion, newEnv, newLogger)
 import Control.Lens.Setter (set)
 
 import LiftedGlacierRequests (GlacierEnv(..), GlacierSettings(..))
 import AllowedPartSizes (PartSize)
 import UploadSnapshot
+import SimpleDB (dumpCsv, loadCsv, listUploads)
 
 deriving instance Generic LogLevel
 instance FromJSON LogLevel
@@ -40,7 +44,7 @@ configDefaults = object [
     "log_level"           .= String "Info"
   ]
 
-data Command = Provision | ListUploads
+data Command = Provision | ListUploads | Delete SnapshotRef | DumpCSV | LoadCSV FilePath
 
 data CmdOpts = CmdOpts {
   configFile :: !FilePath,
@@ -56,12 +60,15 @@ argParser = info (helper <*> programOpts) $
 programOpts :: Parser CmdOpts
 programOpts = CmdOpts
   <$> strOption (short 'c' <> long "config-file" <> metavar "PATH" <> showDefault <> value "/etc/glacier-backup.yml" <> help "Path to config file.")
-  <*> optional (subparser commandOpt)
+  <*> optional (hsubparser commandOpt)
 
 commandOpt :: Mod CommandFields Command
 commandOpt =
      command "provision" (info (pure Provision) (progDesc "Create the Glacier vault and SimpleDB domain (table)"))
   <> command "uploads" (info (pure ListUploads) (progDesc "List the snapshots uploaded to Glacier"))
+  <> command "delete" (info (Delete <$> argument auto (metavar "SNAPSHOT_NUMBER")) (progDesc "Delete a snapshot from Glacier (and SimpleDB)"))
+  <> command "dumpcsv" (info (pure DumpCSV) (progDesc "Dump the database to a .csv file"))
+  <> command "loadcsv" (info (LoadCSV <$> argument str (metavar "CSV_FILE")) (progDesc "Load a .csv file into the index database."))
 
 setupConfig :: FilePath -> IO (String, GlacierEnv)
 setupConfig configFilePath = do
@@ -79,4 +86,7 @@ main = do
     Nothing -> uploadBackup snapper_config_name
     Just Provision -> provisionAWS
     Just ListUploads -> listUploads
+    Just (Delete snapshot) -> deleteUpload snapper_config_name snapshot
+    Just DumpCSV -> dumpCsv
+    Just (LoadCSV file) -> loadCsv file
 

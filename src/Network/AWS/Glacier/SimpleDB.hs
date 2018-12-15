@@ -1,15 +1,15 @@
-{-# LANGUAGE DeriveGeneric,  FlexibleInstances, PackageImports, TypeApplications, OverloadedStrings, TupleSections #-}
-module SimpleDB (SnapshotUpload(..), getLatestUpload, listUploads, insertSnapshotUpload, createDomain, listDom, select, runSdbInAmazonka) where
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, FlexibleInstances, PackageImports, TypeApplications, OverloadedStrings, TupleSections, ApplicativeDo #-}
+module SimpleDB (SnapshotUpload(..), getLatestUpload, listUploads, insertSnapshotUpload, createDomain, getSnapshot, deleteRow, dumpCsv, loadCsv) where
 
 import Safe (headMay)
-import Data.Maybe (catMaybes)
-import Data.List (sortOn)
 
 import Unsafe.Coerce (unsafeCoerce)
 
-import Control.Monad.IO.Class (liftIO)
+import Control.Monad.IO.Class (MonadIO(liftIO))
+import Data.IORef.MonadIO (readIORef)
 
-
+import Data.Function (on)
+import Data.Foldable (traverse_)
 import Data.Maybe (maybeToList)
 import Network.AWS.Env (envAuth, envLogger, envRegion)
 import Network.AWS.Types (Auth(..), AuthEnv(..), AccessKey(..), SecretKey(..), Service(_svcEndpoint), Endpoint(_endpointHost))
@@ -21,6 +21,8 @@ import qualified Network.AWS.SDB as SDB
 import Network.AWS.Data.Text
 import Network.AWS.Data.ByteString (ToByteString(toBS), showBS)
 import Network.AWS.Data.Time
+import Data.Time.LocalTime --(utcToZonedTime)
+import Data.Time.Format
 
 import Aws (simpleAws, Configuration(..), makeCredentials, Credentials(..), Logger, TimeInfo(Timestamp))
 import qualified Aws
@@ -29,23 +31,27 @@ import Aws.SimpleDb hiding (createDomain)
 import Control.Lens (view)
 import Control.Monad (void, (>=>), (<=<))
 import Control.Monad.Catch (MonadThrow, Exception, throwM)
-import Data.Bifunctor (bimap, first)
+import Data.Bifunctor (bimap)
 
-import Data.String (IsString)
+--import Data.String (IsString)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (decodeUtf8, encodeUtf8, encodeUtf8Builder)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Lazy.Char8 as BSLC
 import "cryptonite" Crypto.Hash (Digest, HashAlgorithm, digestFromByteString)
 import Data.ByteArray.Encoding (Base(Base16), convertFromBase)
 
 import GHC.Generics (Generic)
 
-import Data.Map.Strict (Map, fromList, toList, union, elems)
+--import Data.Map.Strict (Map, fromList, toList, union, elems)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map -- (Map, fromList, toList, union, elems)
 import qualified Data.HashMap.Strict as HM
 import qualified Formatting as F
-import Text.Layout.Table (ColSpec(..), RowGroup, rowG, left, right, fixedCol, unicodeRoundS, titlesH, tableString)
+import Text.Layout.Table --(ColSpec(), rowG, left, right, fixedCol, unicodeRoundS, titlesH, tableString)
 
 import MultipartGlacierUpload (NumBytes, GlacierConstraint, GlacierUpload(..),  HasGlacierSettings(..), _vaultName)
 import Snapper (SnapshotRef)
@@ -54,7 +60,9 @@ import ArchiveSnapshotDescription
 import Data.Csv
 import qualified Data.Csv as Csv
 
-import Util
+import Util (maybeToEither, lowerMaybe)
+import AmazonkaSupport ()
+
 
 digestFromHex :: HashAlgorithm a => Text -> Either String (Digest a)
 digestFromHex = maybeToEither "Can't parse Digest from bytes" . digestFromByteString <=<
@@ -66,6 +74,12 @@ data SnapshotUpload = SnapshotUpload {
   _timestamp :: ISO8601
 } deriving (Show, Generic)
 
+instance Eq SnapshotUpload where
+  (==) = (==) `on` _timestamp
+
+instance Ord SnapshotUpload where
+  compare = compare `on` _timestamp
+
 data DbColumnHeader = PreviousSnapshot | TimeStamp | Size | ArchiveId | TreeHashChecksum deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 instance ToText DbColumnHeader where toText = pack . show
@@ -74,17 +88,18 @@ instance ToByteString DbColumnHeader where toBS = BSC.pack . show
 dbColumnHeaders :: [DbColumnHeader]
 dbColumnHeaders = [minBound..maxBound]
 
-snapshotIdHeader :: IsString a => a
+--snapshotIdHeader :: IsString a => a
+snapshotIdHeader :: ByteString
 snapshotIdHeader = "SnapshotId"
 
-formatISOTime :: UTCTime -> Text
-formatISOTime time = toText (Time time :: ISO8601)
+--formatISOTime :: UTCTime -> Text
+--formatISOTime time = toText (Time time :: ISO8601)
 
 fromISOTime :: Text -> Either String UTCTime
 fromISOTime t = fromTime <$> fromText @ISO8601 t
 
-attr :: ToText v => DbColumnHeader -> v -> Attribute SetAttribute
-attr k v = replaceAttribute (pack $ show k) (toText v)
+--attr :: ToText v => DbColumnHeader -> v -> Attribute SetAttribute
+--attr k v = replaceAttribute (pack $ show k) (toText v)
 
 -- NonEmpty list-shaped, kinda
 data DbRow a = DbRow {
@@ -93,7 +108,7 @@ data DbRow a = DbRow {
 } deriving Show
 
 instance ToNamedRecord (DbRow Text) where
-  toNamedRecord (DbRow _id _values) = namedRecord $ (snapshotIdHeader, toBS _id) : map (bimap toBS toField) (toList $ completeSet _values)
+  toNamedRecord (DbRow _id _values) = namedRecord $ (snapshotIdHeader, toBS _id) : map (bimap toBS toField) (Map.toList $ addMissing _values)
 
 instance FromNamedRecord (DbRow Text) where
   parseNamedRecord m = do
@@ -133,9 +148,35 @@ insertSnapshotUpload snapshotUpload = do
   domainName <- _vaultName <$> view glacierSettingsL  
   void $ runSdbInAmazonka $ putSnapshotUpload domainName snapshotUpload
 
+getSnapshot :: (GlacierConstraint r m) => SnapshotRef -> m SnapshotUpload
+getSnapshot snapId = do
+  domainName <- _vaultName <$> view glacierSettingsL  
+  let _id = toText snapId
+  GetAttributesResponse attributes <- runSdbInAmazonka $ getAttributes _id domainName
+  throwLeftAs SimpleDBParseException $ rowToSnapshotUpload $ DbRow _id $ map nameAttribute attributes
+  --sortOn fst $ map nameAttribute attributes
+  
+rowToSnapshotUpload :: DbRow Text -> Either String SnapshotUpload
+rowToSnapshotUpload (DbRow _id _values) =
+  glacierUploadFromList _id $ Map.toList $ addMissing _values
+
+-- completeMissing Just
+glacierUploadFromList :: Text -> [(DbColumnHeader, Maybe Text)] -> Either String SnapshotUpload
+glacierUploadFromList currentSnapshot [(PreviousSnapshot, ps), (TimeStamp, Just ts), (Size, Just s), (ArchiveId, Just aid), (TreeHashChecksum, Just thcs)] = do
+  snapshotInfo <- ArchiveSnapshotDescription <$> fromText currentSnapshot <*> traverse fromText ps
+  glacierUpload <- GlacierUpload <$> fromText aid <*> digestFromHex thcs <*> fromText s
+  timestamp <- fromText ts
+  pure $ SnapshotUpload glacierUpload snapshotInfo  timestamp
+glacierUploadFromList _ other = Left $ "Can't parse upload info from incomplete / unordered columns: " ++ show other
+
+authEnvFromAuth :: MonadIO m => Auth -> m AuthEnv
+authEnvFromAuth (Auth auth) = pure auth
+authEnvFromAuth (Ref _ authRef) = readIORef authRef
+
 getAwsCreds :: (GlacierConstraint r m) => m Credentials
 getAwsCreds = do
-  Auth auth <- view envAuth
+  --Auth auth <- fromMaybe (throwM "Ref creds not supported") <$> preview envAuth
+  auth <- view envAuth >>= authEnvFromAuth
   makeCredentials (coerce $ _authAccess auth) (coerce $ desensitise $ _authSecret auth)
 
 getAwsLogger :: (GlacierConstraint r m) => m Logger
@@ -152,7 +193,7 @@ amazonkaToAwsLogLevel Amazonka.Info = Aws.Warning
 amazonkaToAwsLogLevel Amazonka.Error = Aws.Error
 -}
 
--- Umm... Amazonka has no "Warn" and Aws has no "Trace
+-- Umm... Amazonka has no "Warn" and Aws has no "Trace"
 -- I'll think about this later.
 awsToAmazonkaLogLevel :: Aws.LogLevel -> Amazonka.LogLevel
 awsToAmazonkaLogLevel Aws.Debug = Amazonka.Trace 
@@ -188,21 +229,33 @@ createDomain :: (GlacierConstraint r m) => m ()
 createDomain = do
   domainName <- _vaultName <$> view glacierSettingsL  
   void $ runSdbInAmazonka $ CreateDomain domainName
-  
 
-throwEither :: (MonadThrow m, Exception e) => Either e a -> m a
-throwEither = either throwM pure
+deleteRow :: (GlacierConstraint r m) => SnapshotRef -> m ()
+deleteRow s = do
+  domainName <- _vaultName <$> view glacierSettingsL  
+  void $ runSdbInAmazonka $ DeleteAttributes (toText s) [] [] domainName
 
-data SimpleDBParseException = SimpleDBParseException String deriving Show
+throwLeftAs :: (MonadThrow m, Exception e) => (String -> e) -> Either String a -> m a
+throwLeftAs ex = either (throwM . ex) pure
 
-instance Exception SimpleDBParseException
+--throwEither :: (MonadThrow m, Exception e) => Either e a -> m a
+--throwEither = either throwM pure
+
+data TableException = SimpleDBParseException String  | CsvError String deriving (Show, Exception)
+
+selectUploads :: (GlacierConstraint r m) => m [DbRow Text]
+selectUploads = do
+  domainName <- _vaultName <$> view glacierSettingsL  
+  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> domainName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp
+  pure $ map itemToRow items
 
 listUploads :: (GlacierConstraint r m) => m ()
 listUploads = do
-  vaultName <- _vaultName <$> view glacierSettingsL  
+  tz <- liftIO $ getCurrentTimeZone
+  --writeCsv
   --SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName
-  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp
-  liftIO $ putStrLn $ formatDisplayTable $ map itemToRow items
+  rows <- selectUploads
+  liftIO $ putStrLn $ formatDisplayTable tz $ rows
 
 
 --The string stuff is only for displaying the table layout for the "uploads" command cause the table layout library uses strings.
@@ -212,36 +265,61 @@ itemToRow :: Item [Attribute Text] -> DbRow Text
 itemToRow (Item name attributes) = DbRow name $ map nameAttribute attributes
 
 -- Fill in missing columns with `Nothing`:
-completeSet :: [(DbColumnHeader, a)] -> Map DbColumnHeader (Maybe a)
-completeSet entries = fmap Just (fromList entries) `union` fromList (map (,Nothing) dbColumnHeaders)
+addMissing :: [(DbColumnHeader, a)] -> Map DbColumnHeader (Maybe a)
+addMissing entries = fmap Just (Map.fromList entries) `Map.union` Map.fromList (map (,Nothing) dbColumnHeaders)
 
-formatDisplayTable :: [DbRow Text] -> String
-formatDisplayTable rows = tableString
+formatDisplayTable :: TimeZone -> [DbRow Text] -> String
+formatDisplayTable tz rows = tableString
   (fixedCol 10 right : map columnFormat dbColumnHeaders)
   unicodeRoundS
   (titlesH $ "SnapshotId" : map show dbColumnHeaders)
-  (map (rowG . formatDisplayRow) rows)
+  (map (rowG . formatDisplayRow tz) rows)
 
-formatDisplayRow :: DbRow Text -> [String]
-formatDisplayRow (DbRow _id _values) = unpack _id : (map lowerMaybe . elems . completeSet . map formatAttribute) _values
+formatDisplayRow :: TimeZone -> DbRow Text -> [String]
+formatDisplayRow tz (DbRow _id _values) = unpack _id : (map lowerMaybe . Map.elems . addMissing . map (formatAttribute tz)) _values
 
 nameAttribute :: Attribute Text -> (DbColumnHeader, Text)
 nameAttribute (ForAttribute name value) = (read $ unpack name, value)
 
-formatAttribute :: (DbColumnHeader, Text) -> (DbColumnHeader, String)
-formatAttribute (Size, v) = (Size, F.formatToString (F.bytes @Double (F.fixed 2 F.% " ")) (read @NumBytes $ unpack v))
-formatAttribute (header, v) = (header, unpack v)
+formatAttribute :: TimeZone -> (DbColumnHeader, Text) -> (DbColumnHeader, String)
+formatAttribute _ (Size, v) = (Size, F.formatToString (F.bytes @Double (F.fixed 2 F.% " ")) (read @NumBytes $ unpack v))
+formatAttribute tz (TimeStamp, v) = (TimeStamp, either error (formatTime defaultTimeLocale (dateTimeFmt defaultTimeLocale) . utcToZonedTime tz) $ fromISOTime v)
+--formatAttribute tz (TimeStamp, v) = (TimeStamp, either error (formatTime defaultTimeLocale rfc822DateFormat . utcToZonedTime tz) $ fromISOTime v)
+formatAttribute _ (header, v) = (header, unpack v)
 
 -- Make a column -> type typeclass?
 -- Numbers (including timestamp) are right-justified
 -- Text is left-justified and truncated.
 columnFormat :: DbColumnHeader -> ColSpec
 columnFormat PreviousSnapshot = fixedCol 16 right
-columnFormat TimeStamp = fixedCol 20 right
-columnFormat Size = fixedCol 12 right
+columnFormat TimeStamp = column expand right noAlign noCutMark
+--columnFormat TimeStamp = fixedCol 29 right
+columnFormat Size = fixedCol 9 right
 columnFormat ArchiveId = fixedCol 10 left
 columnFormat TreeHashChecksum = fixedCol 16 left
 
+loadCsv :: (GlacierConstraint r m) => FilePath -> m ()
+loadCsv file = do
+  csv <- liftIO $ BSL.readFile file
+  (_, rows) <- throwLeftAs CsvError $ decodeByName csv
+  --(_, rows) <- throwLeftAs CsvError $ decodeByName @(DbRow Text) csv
+  snapshotsToInsert <- traverse (throwLeftAs SimpleDBParseException . rowToSnapshotUpload) rows
+  traverse_ insertSnapshotUpload snapshotsToInsert
+
+{-
+selectAll :: (GlacierConstraint r m) => m [[Text]]
+selectAll = do
+  vaultName <- _vaultName <$> view glacierSettingsL  
+  SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName
+  pure $ map (\(Item _id _data) ->  _id : map attributeData _data) items
+-}
+
+dumpCsv :: (GlacierConstraint r m) => m ()
+dumpCsv = do
+  --deleteRow 261
+  --deleteRow 275
+  rows <- selectUploads
+  liftIO $ BSLC.putStrLn $ encodeDefaultOrderedByName rows
 {-
  Current example output:
 ╭────────────┬──────────────────┬──────────────────────┬──────────────┬────────────┬──────────────────╮
@@ -258,4 +336,4 @@ getLatestUpload = do
   -- See https://docs.aws.amazon.com/AmazonSimpleDB/latest/DeveloperGuide/SortingDataSelect.html
   resp <- runSdbInAmazonka $ select $ "SELECT " <> toText TimeStamp <> " FROM " <> vaultName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp <> " DESC LIMIT 1"
   let item = headMay $ srItems resp
-  traverse (throwEither . first SimpleDBParseException . snapshotIdFromItem) item
+  traverse (throwLeftAs SimpleDBParseException . snapshotIdFromItem) item

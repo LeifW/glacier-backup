@@ -1,10 +1,12 @@
 {-# LANGUAGE OverloadedStrings, FlexibleInstances, DeriveGeneric, RecordWildCards, TypeApplications, TupleSections #-}
 --{-# OPTIONS_GHC -fno-warn-orphans #-}
-module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, getSnapshot, setSnapshot, setUploadStatus, createSnapshot, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
+module Snapper (SnapperConfig(..), Snapshot(..), UploadStatus(..), SnapshotRef, getSubvolumeFromConfig, listSnapshots, getSnapshot, setSnapshot, setUploadStatus, createSnapshot, deleteSnapshots, dropAllButMostRecentGlacierUploads, setCleanupToTimeline, runSystemDBus, getLastSnapshot, nthSnapshotOnSubvolume) where
 
+import Data.List (sortOn)
+import Data.Foldable (traverse_)
 import Control.Lens.Lens (Lens', lens)
-import Control.Lens.Setter
-import DBus.Client (Client, call, connectSession, connectSystem, disconnect)
+import Control.Lens.Setter (set)
+import DBus.Client (Client, call, connectSystem, disconnect)
 import DBus
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -17,10 +19,9 @@ import Network.AWS.Data.Time (Time(..), ISO8601)
 import Network.AWS.Data.Text (toText, fromText)
 
 import Data.Text (Text)
-import qualified Data.Text as T
 
 import Data.Word
-import Data.Int
+import Data.Int (Int64)
 
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.FilePath ((</>))
@@ -53,18 +54,17 @@ setSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "SetSnapsho
 createSnapshotMethodCall :: MethodCall
 createSnapshotMethodCall = listSnapshotsMethodCall { methodCallMember = "CreateSingleSnapshot" }
 
+deleteSnapshotsMethodCall :: MethodCall
+deleteSnapshotsMethodCall = listSnapshotsMethodCall { methodCallMember = "DeleteSnapshots" }
+
 type SnapshotRef = Word32
 
-data UploadStatus = UploadStatus {
-  _archiveId :: Text,
-  _deltaFrom :: Maybe SnapshotRef
-} deriving (Eq, Show, Generic)
-
---makeLenses 'UploadStatus
+data UploadStatus = UploadStatus Text (Maybe SnapshotRef)
+  deriving (Eq, Show, Generic)
 
 uploadStatusToMap :: UploadStatus -> Map Text Text
 uploadStatusToMap (UploadStatus archiveId delta) = Map.fromList $
-    ("archiveId", T.take 7 archiveId) : -- the Glacier archive IDs are super long and will make the snapper table view wrap. So truncate them.
+    ("archiveId", archiveId) :
     maybeToList (("deltaFrom",) . toText <$> delta)
 
 uploadStatusFromMap :: Map Text Text -> Maybe UploadStatus 
@@ -77,7 +77,6 @@ data Cleanup = Number | Timeline | None | GlacierBackup deriving (Eq, Show, Gene
 data Snapshot = Snapshot {
   _snapshotNum :: SnapshotRef,
   _timestamp :: ISO8601,
-  --timestamp :: UTCTime,
   _uploadedStatus :: Maybe UploadStatus,
   _cleanup :: Cleanup,
   _description :: Maybe Text
@@ -85,6 +84,9 @@ data Snapshot = Snapshot {
 
 uploadedStatus :: Lens' Snapshot (Maybe UploadStatus)
 uploadedStatus = lens _uploadedStatus (\s us -> s { _uploadedStatus = us } )
+
+cleanup :: Lens' Snapshot Cleanup
+cleanup = lens _cleanup (\s c -> s { _cleanup = c } )
 
 cleanupToString :: Cleanup -> Text
 cleanupToString Number = "number"
@@ -113,10 +115,8 @@ instance IsVariant (Maybe Text) where
 timeFromTimestamp :: Integral a => a -> Time format
 timeFromTimestamp = Time . posixSecondsToUTCTime . fromIntegral 
 
---snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, String, Cleanup, Map String String) -> SnapperSnapshot
 snapshotFromTuple :: (Word32, Word16, Word32, Int64, Word32, Text, Text, Map Text Text) -> Snapshot
 snapshotFromTuple (num, _, _, timestamp, userId, description, cleanup, userdata)  = Snapshot num (timeFromTimestamp timestamp) (uploadStatusFromMap userdata) (cleanupFromString cleanup) (raiseToMaybe description)
---snapshotFromTuple (num, _, _, dateTime, userId, description, cleanup, userdata)  = Snapshot (fromIntegral num) (posixSecondsToUTCTime $ fromIntegral dateTime)
 
 instance IsVariant Snapshot where
   fromVariant v = snapshotFromTuple <$> fromVariant v
@@ -124,7 +124,6 @@ instance IsVariant Snapshot where
 
 -- There's no IsVariant a => IsVariant [a] rule, just IsValue a => IsVariant [a].
 -- And IsValue is a closed class, per the documentation.
---instance IsVariant [SnapshotRef] where
 instance IsVariant [Snapshot] where
   fromVariant = fmap (map snapshotFromTuple) . fromVariant
   --fromVariant v = snapshotFromTuple <$> fromVariant v
@@ -156,6 +155,14 @@ throwIOEither = either throwIO pure
 listSnapshots :: String -> Client -> IO [Snapshot]
 listSnapshots config = doMethodCall listSnapshotsMethodCall [toVariant config]
 
+dropAllButMostRecentGlacierUploads :: Int -> String -> Client -> IO ()
+dropAllButMostRecentGlacierUploads n config client = do
+  snapshots <- listSnapshots config client
+  let glacierSnapshots = sortOn _timestamp [s | s <- snapshots, _cleanup s == GlacierBackup]
+  traverse_ (\s -> setSnapshot config (set cleanup Timeline s) client) $ drop n $ reverse glacierSnapshots
+  --let glacierSnapshots = filter (\s -> _cleanup s == GlacierBackup) snapshots
+  --pure ()
+
 createSnapshot :: String -> Maybe String -> Client -> IO SnapshotRef
 createSnapshot config description = doMethodCall createSnapshotMethodCall [
     toVariant config,
@@ -164,16 +171,20 @@ createSnapshot config description = doMethodCall createSnapshotMethodCall [
     toVariant $ Map.empty @String @String
   ]
   
-
 --getConfig :: String -> Client -> IO (Either MethodError (String, String, Map String String))
 getConfig :: String -> Client -> IO SnapperConfig
 getConfig config = doMethodCall getConfigMethodCall [toVariant config]
-
 
 getSnapshot :: String -> SnapshotRef -> Client -> IO Snapshot
 getSnapshot config snapshotId = doMethodCall getSnapshotMethodCall [
     toVariant config,
     toVariant snapshotId
+  ]
+
+deleteSnapshots :: String -> [SnapshotRef] -> Client -> IO ()
+deleteSnapshots config snapshotIds = doMethodCall deleteSnapshotsMethodCall [
+    toVariant config,
+    toVariant snapshotIds
   ]
 
 setSnapshot :: String -> Snapshot -> Client -> IO ()
@@ -184,13 +195,16 @@ setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [
     toVariant _cleanup,
     toVariant $ maybe Map.empty uploadStatusToMap _uploadedStatus
   ]
---setSnapshot config Snapshot{..} = doMethodCall setSnapshotMethodCall [toVariant config, toVariant @Word32 (fromIntegral snapshotNum), toVariant description, toVariant cleanup, toVariant (Map.empty @String @String)]
---setSnapshot config (Snapshot snapshotNum timestamp description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant snapshot, toVariant description, toVariant cleanup, toVariant userdata]
---setSnapshot config snapshot description cleanup userdata = doMethodCall setSnapshotMethodCall [toVariant config, toVariant (50 :: Word32),  toVariant ("" :: String), toVariant userdata]
 
-setUploadStatus :: String -> SnapshotRef -> UploadStatus -> Client -> IO Snapshot
-setUploadStatus config snapshotId uploadStatus = updateSnapshot config snapshotId $ uploadedStatus ?~ uploadStatus
+setUploadStatus :: String -> SnapshotRef -> Maybe UploadStatus -> Client -> IO Snapshot
+setUploadStatus config snapshotId = updateSnapshot config snapshotId . set uploadedStatus
 --setUploadStatus config snapshotId uploadStatus = updateSnapshot config snapshotId $ \s -> s { _uploadedStatus = Just uploadStatus }
+
+setCleanup :: String -> SnapshotRef -> Cleanup -> Client -> IO Snapshot
+setCleanup config snapshotId = updateSnapshot config snapshotId . set cleanup
+
+setCleanupToTimeline :: String -> SnapshotRef -> Client -> IO Snapshot
+setCleanupToTimeline config snapshotId = setCleanup config snapshotId Timeline
 
 updateSnapshot :: String -> SnapshotRef -> (Snapshot -> Snapshot) -> Client -> IO Snapshot
 updateSnapshot config snapshotId snapshotUpdate client = do
@@ -208,20 +222,9 @@ lastSnapshot :: [Snapshot] -> Maybe Snapshot
 lastSnapshot (Snapshot 0 _ _  _ _ : t) = lastMay t
 --lastSnapshot _ = Nothing
 
---nthSnapshotOnSubvolume :: FilePath -> Snapshot -> FilePath
---nthSnapshotOnSubvolume subvolume snapshot =
---  subvolume </> ".snapshots" </> show (snapshotNum snapshot) </> "snapshot"
-
-nthSnapshotOnSubvolume :: FilePath -> Word32 -> FilePath
+nthSnapshotOnSubvolume :: FilePath -> SnapshotRef -> FilePath
 nthSnapshotOnSubvolume subvolume num =
   subvolume </> ".snapshots" </> show num </> "snapshot"
-
-{-
-snapshotDirFromConfig :: SnapperConfig -> Snapshot -> FilePath
-snapshotDirFromConfig (SnapperConfig subvolume _)  (Snapshot num _) =
-  subvolume </> ".snapshots" </> show num </> "snapshot"
--}
-
 
 data WrappedMethodError = WrappedMethodError MethodError
 

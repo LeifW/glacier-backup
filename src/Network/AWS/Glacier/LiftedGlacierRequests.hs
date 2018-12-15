@@ -1,5 +1,5 @@
 {-# LANGUAGE TemplateHaskell, BangPatterns, ConstraintKinds #-}
-module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize(getNumBytes), NumBytes, UploadId(getAsText), createVault, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, bulk, expedited, standard, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
+module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize, getNumBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, createVault, deleteArchive, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, bulk, expedited, standard, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
 
 import Data.ByteString (ByteString)
 import Control.Lens --(Lens', view, makeLenses, set)
@@ -15,7 +15,7 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Catch
 
-import GlacierRequests (InitiateJobResponse, GetJobOutputResponse, PartSize(getNumBytes), NumBytes, UploadId(getAsText), JobId, Digest, SHA256, ToHashedBody)
+import GlacierRequests (InitiateJobResponse, GetJobOutputResponse, PartSize, getNumBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, JobId, Digest, SHA256, ToHashedBody, bulk, expedited, standard)
 import qualified GlacierRequests
 
 import Network.AWS.Glacier.Types
@@ -79,24 +79,25 @@ jobOutputToSink sink jobId = runResourceT $ do
   sinkBody body sink
 -}
 
-initiateJob :: (GlacierConstraint r m) => JobParameters -> m InitiateJobResponse
-initiateJob jobParams = do
+archiveRetrievalJob :: (GlacierConstraint r m) => ArchiveId -> (JobParameters -> JobParameters) -> m InitiateJobResponse
+archiveRetrievalJob archiveId settings = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
-  GlacierRequests.initiateJob accountId vaultName jobParams
-
-archiveRetrievalJob :: (GlacierConstraint r m) => Text -> (JobParameters -> JobParameters) -> m InitiateJobResponse
-archiveRetrievalJob archiveId settings = initiateJob $ jpArchiveId ?~ archiveId $ settings $ jobParameters ArchiveRetrieval
+  GlacierRequests.archiveRetrievalJob accountId vaultName archiveId settings
 
 inventoryRetrievalJob :: (GlacierConstraint r m) => (JobParameters -> JobParameters) -> m InitiateJobResponse
-inventoryRetrievalJob settings = initiateJob $ settings $ jobParameters InventoryRetrieval
+inventoryRetrievalJob settings = do
+  GlacierSettings accountId vaultName _ <- view glacierSettingsL
+  GlacierRequests.inventoryRetrievalJob accountId vaultName settings
 
 selectJob :: (GlacierConstraint r m) => SelectParameters -> (JobParameters -> JobParameters) -> m InitiateJobResponse
-selectJob selectParams settings = initiateJob $ jpSelectParameters ?~ selectParams $ settings $ jobParameters Select
+selectJob selectParams settings = do
+  GlacierSettings accountId vaultName _ <- view glacierSettingsL
+  GlacierRequests.selectJob accountId vaultName selectParams settings
 
-bulk, expedited, standard :: JobParameters -> JobParameters
-bulk = jpTier ?~ TBulk
-expedited = jpTier ?~ TExpedited
-standard = jpTier ?~ TStandard
+deleteArchive :: (GlacierConstraint r m) => ArchiveId -> m ()
+deleteArchive archiveId = do
+  GlacierSettings accountId vaultName _ <- view glacierSettingsL
+  GlacierRequests.deleteArchive accountId vaultName archiveId
 
 createVault :: (GlacierConstraint r m) => m ()
 createVault = do
@@ -114,7 +115,7 @@ completeMultipartUpload :: (GlacierConstraint r m)
        => UploadId 
        -> NumBytes
        -> Digest SHA256
-       -> m Text
+       -> m ArchiveId
 completeMultipartUpload  uploadId totalArchiveSize treeHashChecksum = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
   GlacierRequests.completeMultipartUpload accountId vaultName uploadId totalArchiveSize treeHashChecksum
