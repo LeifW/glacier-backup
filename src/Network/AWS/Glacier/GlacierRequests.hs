@@ -90,7 +90,7 @@ initiateMultipartUpload :: (AWSMonads r m)
        -> PartSize
        -> m UploadId
 initiateMultipartUpload accountId vaultName archiveDescription partSize = do
-  resp <- runResourceT $ send $ set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText partSize)
+  resp <- runResourceT $ send $ set imuArchiveDescription archiveDescription $ Amazonka.initiateMultipartUpload accountId vaultName (toText $ getNumBytes partSize)
   pure $ UploadId $ resp ^. imursUploadId
 
 completeMultipartUpload :: (AWSMonads r m)
