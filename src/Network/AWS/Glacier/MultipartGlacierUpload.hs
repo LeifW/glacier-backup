@@ -20,6 +20,9 @@ import Network.AWS.Data.Crypto
 
 import TreeHash (treeHashByChunksOf, treeHashList)
 import ConduitSupport (chunksOf, zipWithIndexFrom)
+import AmazonkaSupport (getLogger, textFormat, bytesFormat)
+import Control.Monad.Trans.AWS (LogLevel(..))
+import Formatting (format, int, (%))
 import LiftedGlacierRequests
 
 treeHash :: ByteString -> Digest SHA256
@@ -62,13 +65,13 @@ glacierUploadParts uploadId resumeFrom =
 uploadPart :: (GlacierConstraint r m) => UploadId -> (Int,  ByteString) -> m (NumBytes, Digest SHA256)
 uploadPart uploadId (!sequenceNum, !chunk) = do
   partSize <- _partSize <$> view glacierSettingsL
+  logger <- getLogger
   let !size = BS.length chunk
-  liftIO $ putStr "size: "
-  liftIO $ print size
+  logger Info $ format ("Chunk size: " % bytesFormat) size
   let !byteRange = range sequenceNum partSize size
-  liftIO $ print byteRange
   let !checksum = treeHash chunk
-  liftIO $ putStrLn $ "About to upload part: " <> show sequenceNum
-  liftIO $ print checksum
+  logger Info $ format ("Chunk checksum: " % textFormat) checksum
+  let (start, end) = byteRange in
+    logger Info $ format ("About to upload byte range " % int % " - " % int % " as part number " % int) start end sequenceNum
   uploadMultipartPart uploadId byteRange checksum chunk
   pure (fromIntegral size, checksum) 

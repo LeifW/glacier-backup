@@ -5,13 +5,10 @@ module GlacierUploadFromProc(GlacierConstraint, HasGlacierSettings, NumBytes, Gl
 import MultipartGlacierUpload(HasGlacierSettings, GlacierConstraint, NumBytes, UploadId(uploadIdAsText), GlacierUpload(..), _vaultName, zipChunkAndIndex, uploadByChunks, initiateMultipartUpload, completeMultipartUpload) 
 import Data.Text (Text)
 import Data.Text.Encoding (encodeUtf8)
-import qualified Data.Text.Lazy as Lazy
-import Data.Text.Lazy.Encoding (encodeUtf8Builder)
-import Formatting
+--import qualified Data.Text.Lazy as Lazy
+import Formatting (format, stext, shown, (%))
 import System.Process (CreateProcess, CmdSpec(..), shell, proc) -- for logging
-import Control.Lens (view)
 
-import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Primitive (PrimMonad)
 
 import Database.SQLite.Simple.ToField
@@ -27,8 +24,8 @@ import Control.Exception (Exception, toException)
 
 import ConduitSupport
 import Util (throwExitFailure)
-
-import Control.Monad.Trans.AWS (Logger, LogLevel(..), envLogger)
+import AmazonkaSupport (getLogger, textFormat, bytesFormat)
+import Control.Monad.Trans.AWS (LogLevel(..))
 
 deriving instance Generic CmdSpec
 instance ToJSON CmdSpec
@@ -51,9 +48,6 @@ eitherToFieldParseOk = either (Errors . pure . toException .JSONDecodingError) O
 instance FromField CmdSpec where
   fromField f = fromField f >>= eitherToFieldParseOk . eitherDecodeStrict' . encodeUtf8
 
-liftedTextLogger :: MonadIO m => Logger -> LogLevel -> Lazy.Text -> m ()
-liftedTextLogger lg level = liftIO . lg level . encodeUtf8Builder
-  
 cmdSpecToCreateProcess :: CmdSpec -> CreateProcess
 cmdSpecToCreateProcess (ShellCommand cmd) = shell cmd
 cmdSpecToCreateProcess (RawCommand execPath args) = proc execPath args
@@ -64,21 +58,14 @@ glacierUploadFromProcess :: (GlacierConstraint r m, PrimMonad m)
                          -> Maybe (Int, UploadId)
                          -> m GlacierUpload
 glacierUploadFromProcess cmd archiveDescription resumptionPoint = do
-  logger <- liftedTextLogger <$> view envLogger
-  --uploadId <- initiateMultipartUpload archiveDescription
-  --(resumeFrom, uploadId) <- sequence $ maybe (0, initiateMultipartUpload archiveDescription) (fmap pure) resumptionPoint
-  --(resumeFrom, uploadId) <- maybe ((0,) <$> initiateMultipartUpload archiveDescription) pure resumptionPoint
+  logger <- getLogger
   (resumeFrom, uploadId) <- case resumptionPoint of
     Just (i, upId) -> pure (i, upId)
     Nothing -> (0,) <$> initiateMultipartUpload archiveDescription
-  --let resumeFrom = 0
   logger Info $ format ("Uploading " % shown % " w/ uploadId " % stext) cmd (uploadIdAsText uploadId)
-  --(exitCode, (totalArchiveSize, treeHashChecksum))  <- sourceProcessWithConsumer (proc "cat" ["/home/leif/Downloads/The-Data-Engineers-Guide-to-Apache-Spark.pdf"])$ uploadByChunks uploadId
-  --exitCode, bytes) <- sourceProcessWithConsumer createProcess C.fold
   (exitCode, (!totalArchiveSize, !treeHashChecksum)) <- bufferedSourceProcessWithConsumer (cmdSpecToCreateProcess cmd) zipChunkAndIndex $ uploadByChunks uploadId resumeFrom
-  --(exitCode, (!totalArchiveSize, !treeHashChecksum)) <- sourceProcessWithConsumer (cmdSpecToCreateProcess cmd) $ uploadByChunks uploadId resumeFrom
   throwExitFailure exitCode
-  liftIO $ print totalArchiveSize
-  liftIO $ print treeHashChecksum
+  logger Info $ format ("Total archive size: " % bytesFormat) totalArchiveSize
+  logger Info $ format ("Checksum: " % textFormat) treeHashChecksum
   !archiveId <- completeMultipartUpload uploadId totalArchiveSize treeHashChecksum 
   pure $ GlacierUpload archiveId treeHashChecksum totalArchiveSize 
