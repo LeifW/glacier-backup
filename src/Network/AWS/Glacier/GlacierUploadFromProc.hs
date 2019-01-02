@@ -26,6 +26,7 @@ import System.Posix.Types
 import Control.Exception (Exception, toException)
 
 import ConduitSupport
+import Util (throwExitFailure)
 
 import Control.Monad.Trans.AWS (Logger, LogLevel(..), envLogger)
 
@@ -74,12 +75,10 @@ glacierUploadFromProcess cmd archiveDescription resumptionPoint = do
   logger Info $ format ("Uploading " % shown % " w/ uploadId " % stext) cmd (uploadIdAsText uploadId)
   --(exitCode, (totalArchiveSize, treeHashChecksum))  <- sourceProcessWithConsumer (proc "cat" ["/home/leif/Downloads/The-Data-Engineers-Guide-to-Apache-Spark.pdf"])$ uploadByChunks uploadId
   --exitCode, bytes) <- sourceProcessWithConsumer createProcess C.fold
-  (exitCode, (!totalArchiveSize, !treeHashChecksum)) <- bufferedSourceCommandWithConsumer (cmdSpecToCreateProcess cmd) zipChunkAndIndex $ uploadByChunks uploadId resumeFrom
+  (exitCode, (!totalArchiveSize, !treeHashChecksum)) <- bufferedSourceProcessWithConsumer (cmdSpecToCreateProcess cmd) zipChunkAndIndex $ uploadByChunks uploadId resumeFrom
   --(exitCode, (!totalArchiveSize, !treeHashChecksum)) <- sourceProcessWithConsumer (cmdSpecToCreateProcess cmd) $ uploadByChunks uploadId resumeFrom
+  throwExitFailure exitCode
   liftIO $ print totalArchiveSize
   liftIO $ print treeHashChecksum
-  liftIO $ putStr "Exit code: "
-  liftIO $ print exitCode
-  
   !archiveId <- completeMultipartUpload uploadId totalArchiveSize treeHashChecksum 
   pure $ GlacierUpload archiveId treeHashChecksum totalArchiveSize 

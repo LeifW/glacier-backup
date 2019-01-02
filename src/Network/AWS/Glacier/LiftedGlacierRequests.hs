@@ -1,12 +1,12 @@
 {-# LANGUAGE TemplateHaskell, BangPatterns, ConstraintKinds #-}
-module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, createVault, deleteArchive, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, bulk, expedited, standard, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
+module LiftedGlacierRequests (GlacierSettings(..), GlacierEnv(..), HasGlacierSettings(..), GlacierConstraint, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, JobDescription(..), JobId, GlacierUpload(..), createVault, deleteArchive, initiateMultipartUpload, archiveRetrievalJob, inventoryRetrievalJob, selectJob, getJobOutput, bulk, expedited, standard, listJobs, saveJobOutput, jobOutputToStdout, completeMultipartUpload, uploadMultipartPart, Digest, SHA256) where
 
 import Data.ByteString (ByteString)
 import Control.Lens --(Lens', view, makeLenses, set)
 
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Resource (ResourceT, liftResourceT)
-import Control.Monad.Trans.AWS (AWSConstraint, HasEnv(..), Env, runResourceT, sinkBody)
+import Control.Monad.Trans.AWS (AWSConstraint, HasEnv(..), Env, runResourceT)
 import Network.AWS.Data.Body (_streamBody)
 import Data.Conduit (ConduitT, runConduit, Void, (.|), transPipe)
 import Data.Conduit.Combinators (sinkFile, stdout)
@@ -15,7 +15,7 @@ import Control.Monad.IO.Unlift
 import Control.Monad.Reader.Class
 import Control.Monad.Catch
 
-import GlacierRequests (InitiateJobResponse, GetJobOutputResponse, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, JobId, Digest, SHA256, ToHashedBody, bulk, expedited, standard)
+import GlacierRequests (GetJobOutputResponse, PartSize, partSizeInBytes, NumBytes, UploadId(uploadIdAsText), ArchiveId, GlacierUpload(..), JobDescription(..), JobId, Digest, SHA256, ToHashedBody, bulk, expedited, standard)
 import qualified GlacierRequests
 
 import Network.AWS.Glacier.Types
@@ -50,6 +50,11 @@ instance HasEnv GlacierEnv  where
 instance HasGlacierSettings GlacierEnv where
   glacierSettingsL = glacierSettings
 
+listJobs :: (GlacierConstraint r m) => m [JobDescription]
+listJobs = do
+  GlacierSettings accountId vaultName _ <- view glacierSettingsL
+  GlacierRequests.listJobs accountId vaultName
+
 getJobOutput :: (AWSConstraint r m, HasGlacierSettings r) => JobId -> m GetJobOutputResponse
 getJobOutput jobId = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
@@ -79,20 +84,20 @@ jobOutputToSink sink jobId = runResourceT $ do
   sinkBody body sink
 -}
 
-archiveRetrievalJob :: (GlacierConstraint r m) => ArchiveId -> (JobParameters -> JobParameters) -> m InitiateJobResponse
-archiveRetrievalJob archiveId settings = do
+archiveRetrievalJob :: (GlacierConstraint r m) => Tier -> ArchiveId -> Maybe Text -> m JobId
+archiveRetrievalJob tier archiveId jobDescription = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
-  GlacierRequests.archiveRetrievalJob accountId vaultName archiveId settings
+  GlacierRequests.archiveRetrievalJob accountId vaultName tier archiveId jobDescription
 
-inventoryRetrievalJob :: (GlacierConstraint r m) => (JobParameters -> JobParameters) -> m InitiateJobResponse
-inventoryRetrievalJob settings = do
+inventoryRetrievalJob :: (GlacierConstraint r m) => Tier -> Maybe Text -> (JobParameters -> JobParameters) -> m JobId
+inventoryRetrievalJob tier jobDescription settings = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
-  GlacierRequests.inventoryRetrievalJob accountId vaultName settings
+  GlacierRequests.inventoryRetrievalJob accountId vaultName tier jobDescription settings
 
-selectJob :: (GlacierConstraint r m) => SelectParameters -> (JobParameters -> JobParameters) -> m InitiateJobResponse
-selectJob selectParams settings = do
+selectJob :: (GlacierConstraint r m) => Tier -> Maybe Text -> SelectParameters -> (JobParameters -> JobParameters) -> m JobId
+selectJob selectParams tier jobDescription settings = do
   GlacierSettings accountId vaultName _ <- view glacierSettingsL
-  GlacierRequests.selectJob accountId vaultName selectParams settings
+  GlacierRequests.selectJob accountId vaultName selectParams tier jobDescription settings
 
 deleteArchive :: (GlacierConstraint r m) => ArchiveId -> m ()
 deleteArchive archiveId = do

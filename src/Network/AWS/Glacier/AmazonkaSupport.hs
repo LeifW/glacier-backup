@@ -1,11 +1,16 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module AmazonkaSupport (runReaderResource) where
+{-# LANGUAGE PackageImports, TypeApplications, DeriveAnyClass, RankNTypes #-}
+module AmazonkaSupport (runReaderResource, digestFromHexThrow, fromTextThrow, ParseException(..), ensureResponseGetterIs, ensure200Response, ensure201Response, ensure202Response, ensure204Response) where
+
+import Data.Typeable (Typeable)
 
 import Control.Monad.Reader (ReaderT, runReaderT)
 import Control.Monad.Trans.Resource (ResourceT, MonadUnliftIO, runResourceT)
 
 import Control.Applicative ((<|>))
-import Network.AWS.Data.Text (Text, ToText(..), FromText(..))
+import Control.Monad ((<=<))
+import Control.Monad.Catch 
+import Network.AWS.Data.Text (Text, ToText(..), FromText(..), fromText)
 import Data.Attoparsec.Text (decimal, endOfInput)
 import qualified Data.Text.Lazy as LText
 import Data.Text.Lazy.Builder (Builder)
@@ -13,7 +18,14 @@ import qualified Data.Text.Lazy.Builder            as Build
 import qualified Data.Text.Lazy.Builder.Int        as Build
 import Data.Word
 
-import Util (lowerMaybe)
+import Control.Lens (Lens', view)
+
+import Data.Text.Encoding (encodeUtf8)
+import Data.ByteString (ByteString)
+import Data.ByteArray.Encoding (Base(Base16), convertFromBase)
+import "cryptonite" Crypto.Hash (Digest, HashAlgorithm, digestFromByteString)
+
+import Util (lowerMaybe, throwLeftAs, maybeToEither, ensureIs)
 
 runReaderResource :: MonadUnliftIO m => r -> ReaderT r (ResourceT m) a -> m a
 runReaderResource r m = runResourceT $ runReaderT m r
@@ -37,4 +49,29 @@ instance ToText a => ToText (Maybe a) where
   toText = lowerMaybe . fmap toText
 
 instance (FromText a) => FromText (Maybe a) where
-  parser = (const Nothing <$> endOfInput) <|> (Just <$> parser)
+  parser = (Nothing <$ endOfInput) <|> (Just <$> parser)
+
+data ParseException = ParseException String | DecodeChecksumException String deriving (Show, Exception)
+
+fromTextThrow :: (MonadThrow m, FromText a) => Text -> m a
+fromTextThrow = throwLeftAs ParseException . fromText
+
+digestFromHexThrow :: (MonadThrow m, HashAlgorithm a) => Text -> m (Digest a)
+digestFromHexThrow = throwLeftAs DecodeChecksumException . digestFromHex
+
+digestFromHex :: HashAlgorithm a => Text -> Either String (Digest a)
+digestFromHex = maybeToEither "Digest is wrong size for algorithm specified" . digestFromByteString <=<
+                convertFromBase @ByteString @ByteString Base16 . encodeUtf8
+
+ensureResponseGetterIs :: (MonadThrow m, Eq a, Show a, Typeable a) => String -> a -> Lens' r a -> r -> m ()
+ensureResponseGetterIs label expected getter = ensureIs label expected . view getter
+
+ensureResponseCodeIs :: MonadThrow m => Int -> Lens' a Int -> a -> m ()
+ensureResponseCodeIs = ensureResponseGetterIs "response code"
+
+ensure200Response, ensure201Response, ensure202Response, ensure204Response :: MonadThrow m => Lens' a Int -> a -> m ()
+ensure200Response = ensureResponseCodeIs 200
+ensure201Response = ensureResponseCodeIs 201
+ensure202Response = ensureResponseCodeIs 202
+ensure204Response = ensureResponseCodeIs 204
+

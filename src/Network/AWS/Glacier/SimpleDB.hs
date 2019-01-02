@@ -1,5 +1,5 @@
-{-# LANGUAGE DeriveGeneric, DeriveAnyClass, FlexibleInstances, PackageImports, TypeApplications, OverloadedStrings, TupleSections, ApplicativeDo #-}
-module SimpleDB (SnapshotUpload(..), getLatestUpload, listUploads, insertSnapshotUpload, createDomain, getSnapshot, deleteRow, dumpCsv, loadCsv) where
+{-# LANGUAGE DeriveGeneric, DeriveAnyClass, FlexibleInstances, TypeApplications, OverloadedStrings, TupleSections, ApplicativeDo #-}
+module SimpleDB (SnapshotUpload(..), getLatestUpload, printUploadsTable, uploadsList, insertSnapshotUpload, createDomain, getSnapshot, deleteRow, dumpCsv, loadCsv) where
 
 import Safe (headMay)
 
@@ -29,20 +29,18 @@ import qualified Aws
 import Aws.SimpleDb hiding (createDomain)
 
 import Control.Lens (view)
-import Control.Monad (void, (>=>), (<=<))
+import Control.Monad (void)
 import Control.Monad.Catch (MonadThrow, Exception, throwM)
 import Data.Bifunctor (bimap)
 
 --import Data.String (IsString)
 import Data.Text (Text, pack, unpack)
-import Data.Text.Encoding (decodeUtf8, encodeUtf8, encodeUtf8Builder)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8Builder)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.ByteString.Lazy.Char8 as BSLC
-import "cryptonite" Crypto.Hash (Digest, HashAlgorithm, digestFromByteString)
-import Data.ByteArray.Encoding (Base(Base16), convertFromBase)
 
 import GHC.Generics (Generic)
 
@@ -60,13 +58,9 @@ import ArchiveSnapshotDescription
 import Data.Csv
 import qualified Data.Csv as Csv
 
-import Util (maybeToEither, lowerMaybe)
-import AmazonkaSupport ()
+import Util (lowerMaybe, throwLeftAs)
+import AmazonkaSupport (fromTextThrow, digestFromHexThrow)
 
-
-digestFromHex :: HashAlgorithm a => Text -> Either String (Digest a)
-digestFromHex = maybeToEither "Can't parse Digest from bytes" . digestFromByteString <=<
-                convertFromBase @ByteString @ByteString Base16 . encodeUtf8
 
 data SnapshotUpload = SnapshotUpload {
   _glacierUploadResult :: GlacierUpload,
@@ -140,8 +134,8 @@ putSnapshotUpload :: Text -> SnapshotUpload -> PutAttributes
 putSnapshotUpload domainName s = putAttributes currentSnapshotNum [replaceAttribute (pack $ show k) v | (k, v) <-  values] domainName
   where DbRow currentSnapshotNum values = snapshotUploadToRow s
 
-snapshotIdFromItem :: Item a -> Either String SnapshotRef
-snapshotIdFromItem item = fromText $ itemName item
+snapshotIdFromItem :: MonadThrow m => Item a -> m SnapshotRef
+snapshotIdFromItem item = fromTextThrow $ itemName item
 
 insertSnapshotUpload :: (GlacierConstraint r m) => SnapshotUpload -> m ()
 insertSnapshotUpload snapshotUpload = do
@@ -153,21 +147,21 @@ getSnapshot snapId = do
   domainName <- _vaultName <$> view glacierSettingsL  
   let _id = toText snapId
   GetAttributesResponse attributes <- runSdbInAmazonka $ getAttributes _id domainName
-  throwLeftAs SimpleDBParseException $ rowToSnapshotUpload $ DbRow _id $ map nameAttribute attributes
+  rowToSnapshotUpload $ DbRow _id $ map nameAttribute attributes
   --sortOn fst $ map nameAttribute attributes
   
-rowToSnapshotUpload :: DbRow Text -> Either String SnapshotUpload
+rowToSnapshotUpload :: MonadThrow m => DbRow Text -> m SnapshotUpload
 rowToSnapshotUpload (DbRow _id _values) =
   glacierUploadFromList _id $ Map.toList $ addMissing _values
 
 -- completeMissing Just
-glacierUploadFromList :: Text -> [(DbColumnHeader, Maybe Text)] -> Either String SnapshotUpload
+glacierUploadFromList :: MonadThrow m => Text -> [(DbColumnHeader, Maybe Text)] -> m SnapshotUpload
 glacierUploadFromList currentSnapshot [(PreviousSnapshot, ps), (TimeStamp, Just ts), (Size, Just s), (ArchiveId, Just aid), (TreeHashChecksum, Just thcs)] = do
-  snapshotInfo <- ArchiveSnapshotDescription <$> fromText currentSnapshot <*> traverse fromText ps
-  glacierUpload <- GlacierUpload <$> fromText aid <*> digestFromHex thcs <*> fromText s
-  timestamp <- fromText ts
+  snapshotInfo <- ArchiveSnapshotDescription <$> fromTextThrow currentSnapshot <*> traverse fromTextThrow ps
+  glacierUpload <- GlacierUpload <$> fromTextThrow aid <*> digestFromHexThrow thcs <*> fromTextThrow s
+  timestamp <- fromTextThrow ts
   pure $ SnapshotUpload glacierUpload snapshotInfo  timestamp
-glacierUploadFromList _ other = Left $ "Can't parse upload info from incomplete / unordered columns: " ++ show other
+glacierUploadFromList _ other = throwM $ ColumnMisMashException $ "Can't parse upload info from incomplete / unordered columns: " ++ show other
 
 authEnvFromAuth :: MonadIO m => Auth -> m AuthEnv
 authEnvFromAuth (Auth auth) = pure auth
@@ -235,13 +229,13 @@ deleteRow s = do
   domainName <- _vaultName <$> view glacierSettingsL  
   void $ runSdbInAmazonka $ DeleteAttributes (toText s) [] [] domainName
 
-throwLeftAs :: (MonadThrow m, Exception e) => (String -> e) -> Either String a -> m a
-throwLeftAs ex = either (throwM . ex) pure
+--throwLeftAs :: (MonadThrow m, Exception e) => (String -> e) -> Either String a -> m a
+--throwLeftAs ex = either (throwM . ex) pure
 
 --throwEither :: (MonadThrow m, Exception e) => Either e a -> m a
 --throwEither = either throwM pure
 
-data TableException = SimpleDBParseException String  | CsvError String deriving (Show, Exception)
+data TableException = ColumnMisMashException String | CsvError String deriving (Show, Exception)
 
 selectUploads :: (GlacierConstraint r m) => m [DbRow Text]
 selectUploads = do
@@ -249,13 +243,18 @@ selectUploads = do
   SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> domainName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp
   pure $ map itemToRow items
 
-listUploads :: (GlacierConstraint r m) => m ()
-listUploads = do
-  tz <- liftIO $ getCurrentTimeZone
+uploadsList :: (GlacierConstraint r m) => m [SnapshotUpload]
+uploadsList = do 
+  uploads <- selectUploads
+  traverse rowToSnapshotUpload uploads
+
+printUploadsTable :: (GlacierConstraint r m) => m ()
+printUploadsTable = do
+  tz <- liftIO getCurrentTimeZone
   --writeCsv
   --SelectResponse items _ <- runSdbInAmazonka $ select $ "SELECT * FROM " <> vaultName
   rows <- selectUploads
-  liftIO $ putStrLn $ formatDisplayTable tz $ rows
+  liftIO $ putStrLn $ formatDisplayTable tz rows
 
 
 --The string stuff is only for displaying the table layout for the "uploads" command cause the table layout library uses strings.
@@ -303,7 +302,7 @@ loadCsv file = do
   csv <- liftIO $ BSL.readFile file
   (_, rows) <- throwLeftAs CsvError $ decodeByName csv
   --(_, rows) <- throwLeftAs CsvError $ decodeByName @(DbRow Text) csv
-  snapshotsToInsert <- traverse (throwLeftAs SimpleDBParseException . rowToSnapshotUpload) rows
+  snapshotsToInsert <- traverse rowToSnapshotUpload rows
   traverse_ insertSnapshotUpload snapshotsToInsert
 
 {-
@@ -336,4 +335,4 @@ getLatestUpload = do
   -- See https://docs.aws.amazon.com/AmazonSimpleDB/latest/DeveloperGuide/SortingDataSelect.html
   resp <- runSdbInAmazonka $ select $ "SELECT " <> toText TimeStamp <> " FROM " <> vaultName <> " WHERE " <> toText TimeStamp <> " IS NOT NULL ORDER BY " <> toText TimeStamp <> " DESC LIMIT 1"
   let item = headMay $ srItems resp
-  traverse (throwLeftAs SimpleDBParseException . snapshotIdFromItem) item
+  traverse snapshotIdFromItem item

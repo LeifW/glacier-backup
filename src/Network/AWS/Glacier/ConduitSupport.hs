@@ -2,11 +2,12 @@
 module ConduitSupport where
 
 import Data.ByteString (ByteString)
-import Data.Conduit (ConduitT, Void, (.|), await, yield)
-import Data.Conduit.Process (CreateProcess, ClosedStream(..), streamingProcess, waitForStreamingProcess)
+import Data.Conduit (ConduitT, Void, (.|), runConduit, await, yield)
+import Data.Conduit.Process (CreateProcess, ClosedStream(..), Inherited(..), streamingProcess, waitForStreamingProcess)
 import Data.Conduit.Async (buffer)
 import System.Exit (ExitCode)
 
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.IO.Unlift (MonadUnliftIO)
 import Control.Monad.Primitive (PrimMonad)
 
@@ -15,7 +16,6 @@ import Data.Word8 (Word8)
 import Data.ByteString.Internal (ByteString (PS))
 
 import qualified Data.Conduit.Combinators as C
---import ClassyPrelude (fromByteVector)
 
 -- From ClassyPrelude
 -- | Convert a storable 'Vector' into a 'ByteString'.
@@ -31,30 +31,30 @@ chunksOf size =
      C.vectorBuilder size C.mapM_E
   .| C.map fromByteVector
 
-zipWithIndexFrom :: (Enum e, Monad m) => e -> ConduitT a (e, a) m ()
-zipWithIndexFrom e =
-    loop e
-  where
-    --loop !i = do
-    --  mx <- await
-    --  case mx of
-    --    Nothing -> pure ()
-    --    Just x -> do
-    --      yield (i, x)
-    --      loop (i + 1)
-    loop !i = await >>= maybe (pure ()) (\x -> do
-                                                 yield (i, x)
-                                                 loop (succ i)
-                                        )
+zipWithIndexFrom :: (Enum i, Monad m) => i -> ConduitT a (i, a) m ()
+zipWithIndexFrom !i = await >>= maybe (pure ()) (\x -> do
+                                                         yield (i, x)
+                                                         zipWithIndexFrom (succ i)
+                                                )
 
-bufferedSourceCommandWithConsumer :: MonadUnliftIO m
+bufferedSourceProcessWithConsumer :: MonadUnliftIO m
   => CreateProcess
   -> ConduitT ByteString a m ()
   -> ConduitT a Void m r 
   -> m (ExitCode, r)
-bufferedSourceCommandWithConsumer cmd sourceTransformer consumer = do
-  (ClosedStream, (source, close), ClosedStream, cph) <- streamingProcess cmd
+bufferedSourceProcessWithConsumer cmd sourceTransformer consumer = do
+  (ClosedStream, (source, close), Inherited, cph) <- streamingProcess cmd
   res <- buffer 1 (source .| sourceTransformer) consumer
   close
   ec <- waitForStreamingProcess cph
-  return (ec, res)
+  pure (ec, res)
+
+sinkProcessWithProducer :: MonadIO m
+  => ConduitT () ByteString m ()
+  -> CreateProcess
+  -> m ExitCode
+sinkProcessWithProducer producer cmd = do
+  ((sink, close), Inherited, Inherited, cph) <- streamingProcess cmd
+  runConduit $ producer .| sink
+  close
+  waitForStreamingProcess cph

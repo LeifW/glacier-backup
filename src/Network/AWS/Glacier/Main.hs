@@ -1,30 +1,43 @@
-{-# LANGUAGE OverloadedStrings, StandaloneDeriving, DeriveGeneric, DeriveAnyClass, RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings, DeriveGeneric, DeriveAnyClass, RecordWildCards, TypeApplications #-}
 module Main where
 
 import System.IO (stdout)
-import Data.Text (Text)
+import Data.Text (Text, pack, unpack, toLower, intercalate)
 
 import GHC.Generics (Generic)
 
 import Options.Applicative
-import Options.Applicative.Types (readerAsk)
-import Data.Yaml (Value(..), ToJSON, FromJSON, object, (.=))
+import Data.Aeson (Value(..), ToJSON, FromJSON(..), object, (.=))
 import Data.Yaml.Config (loadYamlSettings, useEnv)
 
 import Control.Monad.Reader (runReaderT)
-import Network.AWS.Data.Text (FromText)
-import qualified Network.AWS.Data.Text as AWSText
+import Control.Monad.IO.Class (liftIO)
+import Network.AWS.Data.Text (ToText, FromText, fromText, toText)
+import Network.AWS.Data.JSON (parseJSONText)
 import Control.Monad.Trans.AWS (Region, Credentials(Discover), LogLevel(..), envLogger, envRegion, newEnv, newLogger)
+import Network.AWS.Glacier.Types (Tier(..))
 import Control.Lens.Setter (set)
 
 import LiftedGlacierRequests (GlacierEnv(..), GlacierSettings(..))
 import AllowedPartSizes (PartSize)
 import UploadSnapshot
-import SimpleDB (dumpCsv, loadCsv, listUploads)
+import SimpleDB (dumpCsv, loadCsv, printUploadsTable)
+import Restore
 
-deriving instance Generic LogLevel
-instance FromJSON LogLevel
-instance ToJSON LogLevel
+instance FromJSON LogLevel where parseJSON = parseJSONText "LogLevel"
+
+lowerText :: ToText a => a -> Text
+lowerText = toLower . toText
+
+showDefaultText :: ToText a => Mod f a
+showDefaultText = showDefaultWith $ unpack . lowerText
+
+tierLabels :: String
+tierLabels = unpack $ intercalate " | " $ map lowerText [minBound @ Tier .. maxBound]
+
+-- Like 'auto' but for using FromText instead of Read.
+fromFromText :: FromText a => ReadM a
+fromFromText = eitherReader $ fromText . pack
 
 data Config = Config {
   snapper_config_name :: String, -- Defaults to "root"
@@ -41,10 +54,10 @@ configDefaults = object [
     "snapper_config_name" .= String "root",
     "aws_account_id"      .= String "-",
     "upload_part_size_MB" .= Number 32,
-    "log_level"           .= String "Info"
+    "log_level"           .= String "info"
   ]
 
-data Command = Provision | ListUploads | Delete SnapshotRef | DumpCSV | LoadCSV FilePath
+data Command = Provision | ListUploads | Delete SnapshotRef | DumpCSV | LoadCSV FilePath | InitiateRetrieval Tier | Restore FilePath
 
 data CmdOpts = CmdOpts {
   configFile :: !FilePath,
@@ -67,8 +80,10 @@ commandOpt =
      command "provision" (info (pure Provision) (progDesc "Create the Glacier vault and SimpleDB domain (table)"))
   <> command "uploads" (info (pure ListUploads) (progDesc "List the snapshots uploaded to Glacier"))
   <> command "delete" (info (Delete <$> argument auto (metavar "SNAPSHOT_NUMBER")) (progDesc "Delete a snapshot from Glacier (and SimpleDB)"))
-  <> command "dumpcsv" (info (pure DumpCSV) (progDesc "Dump the database to a .csv file"))
+  <> command "dumpcsv" (info (pure DumpCSV) (progDesc "Dump the index database to .csv"))
   <> command "loadcsv" (info (LoadCSV <$> argument str (metavar "CSV_FILE")) (progDesc "Load a .csv file into the index database."))
+  <> command "initiate-retrieval" (info (InitiateRetrieval <$> option fromFromText (long "tier" <> short 't' <> metavar tierLabels <> showDefaultText <> value TBulk)) (progDesc "print a thing"))
+  <> command "restore" (info (Restore <$> argument str (metavar "DIR")) (progDesc "Download the btrfs snapshots and restore subvolume to path."))
 
 setupConfig :: FilePath -> IO (String, GlacierEnv)
 setupConfig configFilePath = do
@@ -85,8 +100,10 @@ main = do
   flip runReaderT glacierEnv $ case subCommand of
     Nothing -> uploadBackup snapper_config_name
     Just Provision -> provisionAWS
-    Just ListUploads -> listUploads
+    Just ListUploads -> printUploadsTable
     Just (Delete snapshot) -> deleteUpload snapper_config_name snapshot
     Just DumpCSV -> dumpCsv
     Just (LoadCSV file) -> loadCsv file
+    Just (InitiateRetrieval tier) -> initiateRetrieval tier >>= mapM_ (liftIO . print)
+    Just (Restore dir) -> restore dir
 
